@@ -1,11 +1,11 @@
-import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import stepik_workspace as sw
+from stepik_mcp import workspace as sw
+
 
 
 class TextCourseClient:
@@ -32,7 +32,7 @@ class TextCourseClient:
 
 class TextCourseCacheTests(unittest.TestCase):
     def test_all_lessons_are_saved_but_only_text_steps_are_rendered(self):
-        with tempfile.TemporaryDirectory(dir=r"C:\Temp\opencode") as temporary:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("STEPIK_MCP_TEST_TMPDIR")) as temporary:
             root = Path(temporary) / "Courses"
             with patch.dict(os.environ, {"COURSE_WORKSPACE_ROOT": str(root)}):
                 result = sw.cache_course_text_lessons(TextCourseClient(), 7)
@@ -49,7 +49,7 @@ class TextCourseCacheTests(unittest.TestCase):
 
     def test_existing_text_only_files_are_not_overwritten(self):
         client = TextCourseClient()
-        with tempfile.TemporaryDirectory(dir=r"C:\Temp\opencode") as temporary:
+        with tempfile.TemporaryDirectory(dir=os.environ.get("STEPIK_MCP_TEST_TMPDIR")) as temporary:
             root = Path(temporary) / "Courses"
             with patch.dict(os.environ, {"COURSE_WORKSPACE_ROOT": str(root)}):
                 sw.cache_course_text_lessons(client, 7)

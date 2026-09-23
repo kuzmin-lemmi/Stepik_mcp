@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stepik-mcp"
+dynamic = ["version"]
+description = "MCP server that lets AI agents read, cache and (soon) publish Stepik courses"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "kuzmin-lemmi" }]
+keywords = ["stepik", "mcp", "model-context-protocol", "claude", "opencode", "education"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Education",
+]
+dependencies = [
+    "mcp>=2.1,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+]
+
+[project.scripts]
+stepik-mcp = "stepik_mcp.server:main"
+
+[project.urls]
+Repository = "https://github.com/kuzmin-lemmi/Stepik_mcp"
+Issues = "https://github.com/kuzmin-lemmi/Stepik_mcp/issues"
+
+[tool.hatch.version]
+path = "src/stepik_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stepik_mcp"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["F", "E9"]

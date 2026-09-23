@@ -5,8 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import stepik_bridge as sb
-import stepik_workspace as sw
+from stepik_mcp import workspace as sw
 
 
 class FakeClient:
@@ -34,7 +33,7 @@ class FakeClient:
 
 class CommentCacheTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir=r"C:\Temp\opencode")
+        self.tmp = tempfile.TemporaryDirectory(dir=os.environ.get("STEPIK_MCP_TEST_TMPDIR"))
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "Courses"
         self.folder = self.root / "course-1"

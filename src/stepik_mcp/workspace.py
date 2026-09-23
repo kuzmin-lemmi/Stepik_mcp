@@ -8,7 +8,9 @@ import re
 import tempfile
 from datetime import datetime, timezone
 
-import stepik_bridge as sb
+from .client import StepikError
+from .feedback import comments_for_steps, render_comments
+from .render import render_step
 
 
 COURSE_INSTRUCTIONS = """# Course Workspace
@@ -31,10 +33,10 @@ def _inside(parent, relative):
     """Reject path traversal, Windows drive/ADS paths and escaping links/junctions."""
     path = PureWindowsPath(relative)
     if path.root or path.drive or ".." in path.parts or ":" in str(relative):
-        raise sb.StepikError("Unsafe workspace path")
+        raise StepikError("Unsafe workspace path")
     candidate = parent / relative
     if not candidate.resolve().is_relative_to(parent.resolve()):
-        raise sb.StepikError("Workspace path escapes its directory")
+        raise StepikError("Workspace path escapes its directory")
     return candidate
 
 
@@ -62,7 +64,7 @@ def _atomic_write(path, text, *, replace=False):
 def _objects(client, endpoint, ids):
     rows = {row["id"]: row for row in client.by_ids(endpoint, ids)}
     if set(ids) - rows.keys():
-        raise sb.StepikError(f"Incomplete API response: {endpoint}; nothing downloaded partially")
+        raise StepikError(f"Incomplete API response: {endpoint}; nothing downloaded partially")
     return rows
 
 
@@ -70,12 +72,12 @@ def _course_structure(client, course_id):
     course = _objects(client, "courses", [course_id])[course_id]
     section_ids = course.get("sections")
     if not isinstance(section_ids, list):
-        raise sb.StepikError("API did not return course sections")
+        raise StepikError("API did not return course sections")
     sections = _objects(client, "sections", section_ids)
     unit_ids = []
     for section in sections.values():
         if not isinstance(section.get("units"), list):
-            raise sb.StepikError("API did not return section units")
+            raise StepikError("API did not return section units")
         unit_ids.extend(section["units"])
     units = _objects(client, "units", unit_ids)
     manifest = {
@@ -87,7 +89,7 @@ def _course_structure(client, course_id):
     for section in sorted(sections.values(), key=lambda item: item["position"]):
         number = section["position"]
         if type(number) is not int or number < 1 or number in positions:
-            raise sb.StepikError("Invalid or duplicate section position")
+            raise StepikError("Invalid or duplicate section position")
         positions.add(number)
         title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", section.get("title", ""))
         title = re.sub(r"\s+", "-", title).strip(" .-")[:60].rstrip(" .") or "module"
@@ -101,12 +103,12 @@ def _course_structure(client, course_id):
             position = unit["position"]
             lesson_id = unit["lesson"]
             if type(position) is not int or position < 1 or type(lesson_id) is not int or lesson_id < 1:
-                raise sb.StepikError("Invalid lesson position or ID")
+                raise StepikError("Invalid lesson position or ID")
             if unit.get("section") != section["id"]:
-                raise sb.StepikError("Unit does not belong to its section")
+                raise StepikError("Unit does not belong to its section")
             key = f"{number}.{position}"
             if key in manifest["lessons"]:
-                raise sb.StepikError("Duplicate lesson position")
+                raise StepikError("Duplicate lesson position")
             manifest["lessons"][key] = {
                 "lesson_id": lesson_id, "unit_id": uid, "section_id": section["id"],
                 "path": f"{directory}/{number:02d}.{position:02d}-lesson-{lesson_id}.md",
@@ -137,14 +139,14 @@ def _save_index(folder, manifest):
 
 def cache_lesson(client, course_id, lesson_position):
     if type(course_id) is not int or course_id < 1:
-        raise sb.StepikError("course_id must be a positive integer", status=400)
+        raise StepikError("course_id must be a positive integer", status=400)
     if not re.fullmatch(r"[1-9][0-9]*\.[1-9][0-9]*", lesson_position):
-        raise sb.StepikError("lesson_position must be module.lesson, for example 6.2", status=400)
+        raise StepikError("lesson_position must be module.lesson, for example 6.2", status=400)
     root = Path(os.environ.get("COURSE_WORKSPACE_ROOT", r"C:\Courses"))
     if not root.is_absolute():
-        raise sb.StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
+        raise StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
     if any(path.is_symlink() or path.is_junction() for path in (root, *root.parents)):
-        raise sb.StepikError("Workspace root must not pass through symlinks or junctions")
+        raise StepikError("Workspace root must not pass through symlinks or junctions")
     root.mkdir(parents=True, exist_ok=True)
     folder = _inside(root, f"course-{course_id}")
     folder.mkdir(exist_ok=True)
@@ -152,7 +154,7 @@ def cache_lesson(client, course_id, lesson_position):
     try:
         lock.mkdir()
     except FileExistsError:
-        raise sb.StepikError("Course cache is busy. If a process crashed, inspect .stepik-cache.lock before removing it.") from None
+        raise StepikError("Course cache is busy. If a process crashed, inspect .stepik-cache.lock before removing it.") from None
     try:
         index = _inside(folder, ".course.json")
         if index.exists():
@@ -167,18 +169,18 @@ def cache_lesson(client, course_id, lesson_position):
                 for item in manifest["lessons"].values():
                     _inside(folder, item["path"])
             except (ValueError, KeyError, TypeError) as exc:
-                raise sb.StepikError("Invalid .course.json; existing files were not overwritten") from exc
+                raise StepikError("Invalid .course.json; existing files were not overwritten") from exc
         else:
             # Do not adopt an unrelated folder or overwrite an orphaned managed index.
             if any(path != lock for path in folder.iterdir()):
-                raise sb.StepikError("Course folder is not empty but has no .course.json; manual inspection required")
+                raise StepikError("Course folder is not empty but has no .course.json; manual inspection required")
             manifest = _course_structure(client, course_id)
         item = manifest["lessons"].get(lesson_position)
         if item is None:
-            raise sb.StepikError("Lesson is absent from the course structure snapshot. Automatic structure refresh is not implemented.", status=404)
+            raise StepikError("Lesson is absent from the course structure snapshot. Automatic structure refresh is not implemented.", status=404)
         destination = _inside(folder, item["path"])
         if destination.suffix != ".md":
-            raise sb.StepikError("Lesson path must be a Markdown file")
+            raise StepikError("Lesson path must be a Markdown file")
         # Establish recovery metadata before creating any other managed artifacts.
         if not index.exists():
             _atomic_write(index, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
@@ -191,7 +193,7 @@ def cache_lesson(client, course_id, lesson_position):
         _save_index(folder, manifest)
         if destination.exists():
             if not destination.is_file():
-                raise sb.StepikError("Lesson path exists but is not a file")
+                raise StepikError("Lesson path exists but is not a file")
             return {
                 "status": "existing", "path": str(destination), "course_id": course_id,
                 "lesson_id": item["lesson_id"], "position": lesson_position,
@@ -203,7 +205,7 @@ def cache_lesson(client, course_id, lesson_position):
         lesson = _objects(client, "lessons", [lid])[lid]
         step_ids = lesson.get("steps")
         if not isinstance(step_ids, list) or len(set(step_ids)) != len(step_ids):
-            raise sb.StepikError("API did not return a valid complete step list")
+            raise StepikError("API did not return a valid complete step list")
         sources = _objects(client, "step-sources", step_ids)
         fetched_at = datetime.now(timezone.utc).isoformat()
         source_url = f"{client.base_url}/lesson/{lid}"
@@ -217,10 +219,10 @@ def cache_lesson(client, course_id, lesson_position):
         for number, sid in enumerate(step_ids, 1):
             source = sources[sid]
             if source.get("lesson") != lid or not isinstance(source.get("block"), dict):
-                raise sb.StepikError(f"Invalid step-source {sid}; lesson not saved")
+                raise StepikError(f"Invalid step-source {sid}; lesson not saved")
             kind = source["block"].get("name", "unknown")
             # Keep ordinal headings and stable IDs, without the old duplicate heading.
-            body = sb.render_step(source, raw=False, answers=True).partition("\n")[2].lstrip("\n")
+            body = render_step(source, raw=False, answers=True).partition("\n")[2].lstrip("\n")
             lines += [f"<!-- step_id: {sid} -->", f"## \u0428\u0430\u0433 {number} | step_id: {sid} | {kind}", "", body, ""]
         text = "\n".join(lines)
 
@@ -245,18 +247,18 @@ def cache_lesson(client, course_id, lesson_position):
 def cache_lesson_comments(client, course_id, lesson_position):
     """Save the current default-thread comments beside an existing local lesson."""
     if type(course_id) is not int or course_id < 1:
-        raise sb.StepikError("course_id must be a positive integer", status=400)
+        raise StepikError("course_id must be a positive integer", status=400)
     if not re.fullmatch(r"[1-9][0-9]*\.[1-9][0-9]*", lesson_position):
-        raise sb.StepikError("lesson_position must be module.lesson, for example 6.1", status=400)
+        raise StepikError("lesson_position must be module.lesson, for example 6.1", status=400)
     root = Path(os.environ.get("COURSE_WORKSPACE_ROOT", r"C:\Courses"))
     if not root.is_absolute():
-        raise sb.StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
+        raise StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
     if any(path.is_symlink() or path.is_junction() for path in (root, *root.parents)):
-        raise sb.StepikError("Workspace root must not pass through symlinks or junctions")
+        raise StepikError("Workspace root must not pass through symlinks or junctions")
     folder = _inside(root, f"course-{course_id}")
     index = _inside(folder, ".course.json")
     if not index.is_file():
-        raise sb.StepikError("Course cache is not initialized; cache the lesson first")
+        raise StepikError("Course cache is not initialized; cache the lesson first")
     try:
         manifest = json.loads(index.read_text(encoding="utf-8"))
         if manifest["version"] != 1 or manifest["course_id"] != course_id:
@@ -265,20 +267,20 @@ def cache_lesson_comments(client, course_id, lesson_position):
         lesson_path = _inside(folder, item["path"])
         _inside(folder, "COURSE_MAP.md")
     except (ValueError, KeyError, TypeError) as exc:
-        raise sb.StepikError("Invalid .course.json; comments were not saved") from exc
+        raise StepikError("Invalid .course.json; comments were not saved") from exc
     if not lesson_path.is_file():
-        raise sb.StepikError("Local lesson file is missing; cache the lesson first", status=404)
+        raise StepikError("Local lesson file is missing; cache the lesson first", status=404)
     comment_path = lesson_path.with_name(lesson_path.stem + ".comments.md")
     _inside(folder, str(comment_path.relative_to(folder)))
     lock = _inside(folder, ".stepik-comments-cache.lock")
     try:
         lock.mkdir()
     except FileExistsError:
-        raise sb.StepikError("Comments cache is busy. Inspect the lock before removing it.") from None
+        raise StepikError("Comments cache is busy. Inspect the lock before removing it.") from None
     try:
         if comment_path.exists():
             if not comment_path.is_file():
-                raise sb.StepikError("Comments path exists but is not a file")
+                raise StepikError("Comments path exists but is not a file")
             return {
                 "status": "existing", "path": str(comment_path), "course_id": course_id,
                 "lesson_id": item["lesson_id"], "position": lesson_position,
@@ -288,8 +290,8 @@ def cache_lesson_comments(client, course_id, lesson_position):
         lesson = _objects(client, "lessons", [item["lesson_id"]])[item["lesson_id"]]
         step_ids = lesson.get("steps")
         if not isinstance(step_ids, list) or len(set(step_ids)) != len(step_ids):
-            raise sb.StepikError("API did not return a valid complete step list")
-        groups, users = sb._comments_for_steps(client, step_ids)
+            raise StepikError("API did not return a valid complete step list")
+        groups, users = comments_for_steps(client, step_ids)
         fetched_at = datetime.now(timezone.utc).isoformat()
         total = sum(len(comments) for comments in groups.values())
         lines = ["---", f"course_id: {course_id}", f"lesson_id: {item['lesson_id']}",
@@ -301,7 +303,7 @@ def cache_lesson_comments(client, course_id, lesson_position):
             if not comments:
                 continue
             lines += [f"## Шаг {position} · step {step_id}", ""]
-            lines += sb._render_comments(comments, users)
+            lines += render_comments(comments, users)
         if total == 0:
             lines.append("Комментариев в основном обсуждении урока нет.")
         _atomic_write(comment_path, "\n".join(lines))
@@ -318,12 +320,12 @@ def cache_lesson_comments(client, course_id, lesson_position):
 def cache_course_text_lessons(client, course_id):
     """Cache every lesson in a course, retaining only theory text steps."""
     if type(course_id) is not int or course_id < 1:
-        raise sb.StepikError("course_id must be a positive integer", status=400)
+        raise StepikError("course_id must be a positive integer", status=400)
     root = Path(os.environ.get("COURSE_WORKSPACE_ROOT", r"C:\Courses"))
     if not root.is_absolute():
-        raise sb.StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
+        raise StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
     if any(path.is_symlink() or path.is_junction() for path in (root, *root.parents)):
-        raise sb.StepikError("Workspace root must not pass through symlinks or junctions")
+        raise StepikError("Workspace root must not pass through symlinks or junctions")
     root.mkdir(parents=True, exist_ok=True)
     folder = _inside(root, f"course-{course_id}")
     folder.mkdir(exist_ok=True)
@@ -331,7 +333,7 @@ def cache_course_text_lessons(client, course_id):
     try:
         lock.mkdir()
     except FileExistsError:
-        raise sb.StepikError("Course text cache is busy. Inspect the lock before removing it.") from None
+        raise StepikError("Course text cache is busy. Inspect the lock before removing it.") from None
     try:
         index = _inside(folder, ".course.json")
         if index.exists():
@@ -340,10 +342,10 @@ def cache_course_text_lessons(client, course_id):
                 if manifest["version"] != 1 or manifest["course_id"] != course_id:
                     raise ValueError("version or course ID mismatch")
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-                raise sb.StepikError("Invalid .course.json; existing files were not overwritten") from exc
+                raise StepikError("Invalid .course.json; existing files were not overwritten") from exc
         else:
             if any(path != lock for path in folder.iterdir()):
-                raise sb.StepikError("Course folder is not empty but has no .course.json; manual inspection required")
+                raise StepikError("Course folder is not empty but has no .course.json; manual inspection required")
             manifest = _course_structure(client, course_id)
 
         for module in manifest["modules"]:
@@ -363,7 +365,7 @@ def cache_course_text_lessons(client, course_id):
             destination = _inside(folder, item["path"])
             if destination.exists():
                 if not destination.is_file():
-                    raise sb.StepikError(f"Lesson path exists but is not a file: {destination}")
+                    raise StepikError(f"Lesson path exists but is not a file: {destination}")
                 existing.append(position)
                 continue
 
@@ -371,14 +373,14 @@ def cache_course_text_lessons(client, course_id):
             lesson = _objects(client, "lessons", [lesson_id])[lesson_id]
             step_ids = lesson.get("steps")
             if not isinstance(step_ids, list) or len(set(step_ids)) != len(step_ids):
-                raise sb.StepikError(f"API did not return a valid step list for lesson {lesson_id}")
+                raise StepikError(f"API did not return a valid step list for lesson {lesson_id}")
             sources = _objects(client, "step-sources", step_ids)
             text_sources = []
             for step_id in step_ids:
                 source = sources[step_id]
                 block = source.get("block")
                 if source.get("lesson") != lesson_id or not isinstance(block, dict):
-                    raise sb.StepikError(f"Invalid step-source {step_id}; lesson {lesson_id} was not saved")
+                    raise StepikError(f"Invalid step-source {step_id}; lesson {lesson_id} was not saved")
                 if block.get("name") == "text" and block.get("text"):
                     text_sources.append(source)
 
@@ -395,7 +397,7 @@ def cache_course_text_lessons(client, course_id):
                       "<!-- This local copy contains only theory text steps. Tasks are intentionally omitted. -->", ""]
             for number, source in enumerate(text_sources, 1):
                 step_id = source["id"]
-                body = sb.render_step(source, raw=False, answers=False).partition("\n")[2].lstrip("\n")
+                body = render_step(source, raw=False, answers=False).partition("\n")[2].lstrip("\n")
                 lines += [f"<!-- step_id: {step_id} -->", f"## Текстовый шаг {number} | step_id: {step_id}", "", body, ""]
             if not text_sources:
                 lines.append("_(В уроке нет текстовых теоретических шагов.)_")

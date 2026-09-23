@@ -5,13 +5,13 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-import stepik_bridge as sb
-import stepik_workspace as sw
+from stepik_mcp import server, workspace as sw
+from stepik_mcp.client import StepikClient, StepikError
 
 
 class WorkspaceTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(dir=r"C:\Temp\opencode")
+        self.temporary = tempfile.TemporaryDirectory(dir=os.environ.get("STEPIK_MCP_TEST_TMPDIR"))
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "Courses"
         environment = patch.dict(os.environ, {"COURSE_WORKSPACE_ROOT": str(self.root)})
@@ -39,7 +39,7 @@ class WorkspaceTests(unittest.TestCase):
                 {"id": 21, "lesson": 2000, "block": {"name": "text", "text": "<p>Other</p>"}},
             ],
         }
-        self.client = sb.StepikClient("", "")
+        self.client = StepikClient("", "")
         self.client.get = Mock(side_effect=self.get)
 
     def get(self, endpoint, **params):
@@ -101,7 +101,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_partial_steps_do_not_leave_a_lesson_and_retry_succeeds(self):
         source = self.data["step-sources"].pop(0)
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertEqual(list(self.root.rglob("*-lesson-*.md")), [])
         self.assertEqual(list(self.root.rglob(".stepik-cache.lock")), [])
@@ -112,33 +112,33 @@ class WorkspaceTests(unittest.TestCase):
         original = self.get
         def failing(endpoint, **params):
             if endpoint == "step-sources":
-                raise sb.StepikError("Network error")
+                raise StepikError("Network error")
             return original(endpoint, **params)
         self.client.get.side_effect = failing
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertEqual(list(self.root.rglob("*-lesson-*.md")), [])
 
     def test_wrong_source_lesson_is_rejected(self):
         self.data["step-sources"][0]["lesson"] = 9999
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertEqual(list(self.root.rglob("*-lesson-*.md")), [])
 
     def test_incomplete_structure_is_rejected(self):
         self.data["sections"].pop()
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertEqual(list(self.root.rglob("*.md")), [])
 
     def test_invalid_position_does_not_call_api(self):
         for position in ("../1", "0.1", "1", "1.0", "1.1/../../", "1.1 "):
-            with self.subTest(position=position), self.assertRaises(sb.StepikError):
+            with self.subTest(position=position), self.assertRaises(StepikError):
                 self.load(position)
         self.client.get.assert_not_called()
 
     def test_unknown_position_does_not_download_any_lesson(self):
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load("9.9")
         self.assertFalse(any(c.args[0] == "lessons" for c in self.client.get.call_args_list))
 
@@ -150,14 +150,14 @@ class WorkspaceTests(unittest.TestCase):
             with self.subTest(path=unsafe):
                 manifest["lessons"]["1.1"]["path"] = unsafe
                 index.write_text(json.dumps(manifest), encoding="utf-8")
-                with self.assertRaises(sb.StepikError):
+                with self.assertRaises(StepikError):
                     self.load()
 
     def test_corrupt_manifest_is_not_replaced(self):
         self.load()
         index = self.root / "course-1" / ".course.json"
         index.write_text("invalid json", encoding="utf-8")
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertEqual(index.read_text(encoding="utf-8"), "invalid json")
 
@@ -202,7 +202,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_busy_cache_is_not_modified(self):
         lock = self.root / "course-1" / ".stepik-cache.lock"
         lock.mkdir(parents=True)
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertTrue(lock.is_dir())
         self.client.get.assert_not_called()
@@ -212,23 +212,22 @@ class WorkspaceTests(unittest.TestCase):
         folder.mkdir(parents=True)
         existing = folder / "notes.md"
         existing.write_text("Author notes", encoding="utf-8")
-        with self.assertRaises(sb.StepikError):
+        with self.assertRaises(StepikError):
             self.load()
         self.assertEqual(existing.read_text(encoding="utf-8"), "Author notes")
 
     def test_root_junction_is_rejected(self):
         with patch.object(Path, "is_junction", return_value=True):
-            with self.assertRaises(sb.StepikError):
+            with self.assertRaises(StepikError):
                 self.load()
         self.client.get.assert_not_called()
 
     def test_mcp_wrapper_returns_small_json_and_supports_offline_hit(self):
-        import stepik_mcp
-        with patch.object(sb, "CLIENT", self.client):
-            result = json.loads(stepik_mcp.stepik_cache_lesson(1, "1.1"))
+        with patch.object(server, "CLIENT", self.client):
+            result = json.loads(server.stepik_cache_lesson(1, "1.1"))
             self.assertEqual(result["status"], "saved")
             self.client.get.side_effect = AssertionError("Unexpected API request")
-            self.assertEqual(json.loads(stepik_mcp.stepik_cache_lesson(1, "1.1"))["status"], "existing")
+            self.assertEqual(json.loads(server.stepik_cache_lesson(1, "1.1"))["status"], "existing")
 
 
 if __name__ == "__main__":
