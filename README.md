@@ -211,7 +211,7 @@ C:\Courses\course-266999\
 <details>
 <summary><b>Удалённый режим (HTTP)</b></summary>
 
-`stepik-mcp --http` запускает Streamable HTTP на `127.0.0.1:$PORT` с проверкой `Authorization: Bearer $MCP_BEARER_TOKEN`. Он нужен клиентам, которые не умеют запускать локальный процесс. Локальным клиентам достаточно stdio. Выставлять сервер в интернет стоит только за HTTPS; поддержка OAuth для веб-чатов запланирована на этап 7.
+`stepik-mcp --http` запускает Streamable HTTP на `127.0.0.1:$PORT` с проверкой `Authorization: Bearer $MCP_BEARER_TOKEN`. Он нужен клиентам, которые не умеют запускать локальный процесс. Локальным клиентам достаточно stdio. Выставлять сервер в интернет стоит только за HTTPS. Для OpenCode и Claude Desktop этот режим не нужен.
 
 </details>
 
