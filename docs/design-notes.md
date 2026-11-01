@@ -100,7 +100,18 @@ step.discussion_proxy → discussion-proxies.discussions → comments по ID �
 
 Источники: [справка Stepik о статистике уроков](https://help.stepik.org/article/54814), [схема lessons](https://stepik.org/api/docs/api-docs/api/lessons), [схема units](https://stepik.org/api/docs/api-docs/api/units), [официальный Android-клиент](https://github.com/StepicOrg/stepik-android/blob/a92eb8e6fb9d561150379352c297e7e382de53e1/app/src/main/java/org/stepik/android/view/lesson/ui/delegate/LessonInfoTooltipDelegate.kt).
 
-### 3.5. Не подтверждено
+### 3.5. Запись (проверено 2026-11-01)
+
+Проверено на уроке `1767494` (6.1) тестового курса `241862` токеном client credentials владельца курса.
+
+- `POST /api/attachments`, multipart с полями `lesson` и `file`, возвращает `attachments[0].file` в виде пути `/media/attachments/lesson/<lesson_id>/<имя файла>`. Файл открывается по `https://stepik.org` + путь, ответ 200 `image/png`.
+- `POST /api/step-sources` с телом `{"stepSource": {"lesson", "position", "block": {"name": "text", "text"}}}` создаёт шаг на указанной позиции и возвращает `step-sources[0].id`. Проверена вставка в конец урока; вставка в середину ещё не проверена.
+- `PUT /api/step-sources/<id>` с полным объектом шага из GET и новым `block.text` меняет только текст: позиция, `cost` и статус `ready` сохраняются. Соседний шаг не изменился (сверено со снимком).
+- После публикации `html_to_md` от присланного HTML совпадает с локальным Markdown, поэтому повторный план отвечает `nothing_to_push`.
+
+Найденная проблема: HTML вида `<li><p>текст</p></li>` при скачивании превращается в пустой пункт `- ` и отдельный абзац. Правка такого шага через Markdown сломает списки.
+
+### 3.6. Не подтверждено
 
 - **Статистика задания.** Доля верных попыток — не доля решивших учеников: один человек делает несколько попыток. Для выводов об учениках нужны данные по уникальным пользователям и подтверждённый знаменатель.
 - **Оценки и реакции шагов.** Какие endpoint существуют (`step-ratings`, `step-reactions`, `step-votes`) и что значат их поля, не проверено.

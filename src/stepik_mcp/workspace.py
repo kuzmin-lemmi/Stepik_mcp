@@ -1,4 +1,4 @@
-"""Local working copies of Stepik lessons. No writes to Stepik."""
+"""Local working copies of Stepik lessons. No writes to Stepik (see publish.py)."""
 
 import hashlib
 import json
@@ -20,7 +20,8 @@ Use stepik_cache_lesson to obtain a published lesson; then read/edit its local f
 Do not fetch the same lesson again or print the whole lesson in chat after saving it.
 Read only the relevant steps when the task permits; read the full lesson for a full review.
 Fetch comments, statistics, submissions and reviews only when explicitly requested.
-Do not call stepik_lesson_bundle by default. Do not publish to Stepik.
+Do not call stepik_lesson_bundle by default.
+Publish only via stepik_plan_push, then show the diff and call stepik_apply_push after explicit author approval.
 Preserve step IDs and metadata when editing. Never overwrite local work from Stepik.
 Course structure and lesson positions are a local snapshot, not a live synchronization.
 COURSE_MAP.md and .course.json are managed by the loader; do not edit them manually.

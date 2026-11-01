@@ -1,12 +1,15 @@
 """Минимальный клиент Stepik API.
 
-Чтение идёт только через GET; единственный POST — получение OAuth-токена.
+Чтение идёт через GET. Пишущие методы (post, put, upload) вызывает только
+publish.py после проверки списка разрешённых курсов и плана публикации.
 """
 
 import base64
 import json
 import os
+import re
 import time
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +28,7 @@ class StepikError(Exception):
 
 
 class StepikClient:
-    """Минимальный клиент Stepik API. Только GET."""
+    """Минимальный клиент Stepik API."""
 
     def __init__(self, client_id, client_secret, base_url=BASE_URL):
         self.client_id = client_id
@@ -85,12 +88,17 @@ class StepikClient:
         if query:
             url += "?" + urllib.parse.urlencode(query)
 
-        req = urllib.request.Request(
-            url, headers={"Authorization": "Bearer " + self.token()}
-        )
+        return self._request(url, endpoint)
+
+    def _request(self, url, endpoint, method="GET", data=None, content_type=None):
+        headers = {"Authorization": "Bearer " + self.token()}
+        if content_type:
+            headers["Content-Type"] = content_type
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                return json.loads(resp.read().decode())
+                body = resp.read().decode()
+                return json.loads(body) if body else {}
         except urllib.error.HTTPError as exc:
             if exc.code == 403:
                 raise StepikError(
@@ -98,9 +106,42 @@ class StepikClient:
                     "принадлежит OAuth-приложение, нет авторских прав на этот курс.",
                     status=403,
                 ) from exc
-            raise StepikError(f"Stepik вернул {exc.code} на {endpoint}", status=502) from exc
+            detail = ""
+            if method != "GET":
+                # Текст ошибки валидации помогает понять, какое поле не понравилось Stepik.
+                detail = ": " + exc.read().decode(errors="replace")[:300]
+            raise StepikError(f"Stepik вернул {exc.code} на {method} {endpoint}{detail}", status=502) from exc
         except urllib.error.URLError as exc:
             raise StepikError(f"Сеть до Stepik: {exc.reason}") from exc
+
+    # -- запись (только через publish.py) -----------------------------------
+
+    def post(self, endpoint, payload):
+        data = json.dumps(payload).encode()
+        return self._request(f"{self.base_url}/api/{endpoint}", endpoint, "POST", data, "application/json")
+
+    def put(self, endpoint, payload):
+        data = json.dumps(payload).encode()
+        return self._request(f"{self.base_url}/api/{endpoint}", endpoint, "PUT", data, "application/json")
+
+    def upload(self, endpoint, fields, filename, content, mime):
+        """multipart/form-data: обычные поля и один файл в поле file."""
+        boundary = "stepik-" + uuid.uuid4().hex
+        parts = []
+        for name, value in fields.items():
+            parts.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+            )
+        safe_name = re.sub(r'["\r\n]', "_", filename)
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+            f"Content-Type: {mime}\r\n\r\n".encode() + content + b"\r\n"
+        )
+        parts.append(f"--{boundary}--\r\n".encode())
+        return self._request(
+            f"{self.base_url}/api/{endpoint}", endpoint, "POST", b"".join(parts),
+            f"multipart/form-data; boundary={boundary}",
+        )
 
     def collect(self, endpoint, key=None, max_pages=50, **params):
         """GET с проходом по всем страницам. Возвращает плоский список объектов."""

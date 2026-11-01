@@ -3,15 +3,18 @@
 По умолчанию транспорт stdio (Claude Code, Claude Desktop, OpenCode);
 флаг --http включает Streamable HTTP для удалённых клиентов.
 
-Только чтение: ни один инструмент не делает пишущих запросов к Stepik.
 Инструменты stepik_cache_* пишут только в локальный workspace.
+На Stepik пишут только stepik_plan_push/stepik_apply_push (модуль publish)
+и только в курсы из ALLOWED_WRITE_COURSES.
 """
 
 import os
 import json
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
+from . import publish
 from . import workspace as sw
 from .analytics import render_lesson_bundle, render_lesson_stats, render_step_stats
 from .client import StepikClient, StepikError
@@ -31,7 +34,8 @@ CLIENT = StepikClient(
 mcp = MCPServer(
     name="stepik",
     instructions=(
-        "Только чтение на Stepik; stepik_cache_lesson записывает рабочий Markdown локально в C:\\Courses. "
+        "Запись на Stepik только через stepik_plan_push -> показ diff автору -> явное подтверждение -> stepik_apply_push. "
+        "stepik_cache_lesson записывает рабочий Markdown локально в C:\\Courses. "
         "Для получения урока по номеру используй stepik_cache_lesson: ответ содержит путь, а не полный текст. "
         "Затем читай и редактируй локальный файл только в нужном объёме. Не дублируй весь урок в чате. "
         "Для структуры курса используй stepik_course_outline; stepik_lesson нужен для явного вывода текста в чат. "
@@ -133,6 +137,29 @@ def stepik_cache_course_text_lessons(course_id: int) -> str:
         return f"Ошибка Stepik Workspace: {exc}"
     except Exception as exc:
         return f"Ошибка Workspace ({type(exc).__name__}): {exc}"
+
+
+@mcp.tool(
+    description="План публикации текстовых шагов и картинок из локального урока на Stepik. Ничего не отправляет. "
+    "Сравнивает шаги файла (метки <!-- step_id: N -->) с уроком на Stepik, новые шаги помечаются строкой "
+    "<!-- new_step -->. Картинки — локальные файлы в папке курса: ![подпись](images/схема.png). "
+    "Возвращает plan_id, список изменений и путь к diff. Покажите diff автору до stepik_apply_push. "
+    "Работает только для курсов из ALLOWED_WRITE_COURSES.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_push(course_id: int, lesson_position: str) -> str:
+    return _run(lambda: json.dumps(publish.plan_push(CLIENT, course_id, lesson_position), ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Публикует на Stepik план из stepik_plan_push: загружает картинки, меняет и добавляет текстовые шаги. "
+    "Вызывать только после того, как автор увидел diff и явно подтвердил публикацию. Перед записью проверяет, "
+    "что файл и урок на Stepik не менялись, и сохраняет снимок урока в snapshots/.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+                                open_world_hint=True),
+)
+def stepik_apply_push(course_id: int, plan_id: str) -> str:
+    return _run(lambda: json.dumps(publish.apply_push(CLIENT, course_id, plan_id), ensure_ascii=False, indent=2))
 
 
 @mcp.tool(description="Один шаг по его внутреннему id (не по номеру в уроке).")
