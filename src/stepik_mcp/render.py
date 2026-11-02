@@ -14,8 +14,12 @@ from .client import BASE_URL, StepikError
 
 # Версия записи урока в Markdown. 2 — исправленные списки; 3 — цитаты целиком;
 # 4 — таблицы HTML-ом и спойлеры <details>; 5 — стили блоков кода, абзацев и
-# заголовков, размеры картинок, адреса ссылок, пробелы у **жирного**.
-LATEST_FORMAT = 5
+# заголовков, размеры картинок, адреса ссылок, пробелы у **жирного**;
+# 6 — блок кода внутри пункта списка, с отступом под пунктом.
+LATEST_FORMAT = 6
+
+# Ограда блока кода внутри пункта списка: с отступом.
+LIST_FENCE = re.compile(r"^( +)(`{3,})")
 
 # Блоки со style= переходят в файл урока HTML-ом: в Markdown у них нет записи.
 STYLED_BLOCKS = {"p", "h1", "h2", "h3", "h4", "h5", "h6"}
@@ -35,6 +39,8 @@ class _Md(HTMLParser):
         self.old_quotes = fmt < 3
         self.old_blocks = fmt < 4
         self.old_inline = fmt < 5
+        self.old_list_code = fmt < 6
+        self.pre_in_list = False
         self.raw_tag = None       # таблица или блок со стилем: HTML копируется как есть
         self.raw_depth = 0
         self.raw_html = []
@@ -112,7 +118,9 @@ class _Md(HTMLParser):
             self.pre_lang = ""
             self.pre_style = "" if self.old_inline else attrs.get("style") or ""
             self.pre_text = []
-            self._newline(2)
+            # В пункте списка блок кода идёт сразу под текстом пункта, без пустой строки.
+            self.pre_in_list = bool(self.list_stack) and not self.old_list_code
+            self._newline(1 if self.pre_in_list else 2)
         elif tag == "a":
             self.links.append(attrs.get("href") or "")
             self._emit("[")
@@ -150,7 +158,11 @@ class _Md(HTMLParser):
             # Редактор Stepik оборачивает текст пункта в <p>: первый абзац идёт
             # сразу за маркером, следующие продолжают тот же пункт.
             if not self.item_fresh:
-                self._emit("  \n" + "  " * len(self.list_stack))
+                if not self.old_list_code and self.parts and self.parts[-1].endswith("\n"):
+                    # После блока кода строка уже начата: строка из одних пробелов разорвала бы список.
+                    self._emit("  " * len(self.list_stack))
+                else:
+                    self._emit("  \n" + "  " * len(self.list_stack))
         elif tag in self.BLOCK:
             self._newline(2)
 
@@ -205,7 +217,15 @@ class _Md(HTMLParser):
                 code = "".join(self.pre_text).rstrip("\n")
                 fence = code_fence(code)
                 style = f' {{style="{self.pre_style}"}}' if self.pre_style else ""
-                self._emit(f"{fence}{self.pre_lang}{style}\n{code}\n{fence}\n")
+                block = f"{fence}{self.pre_lang}{style}\n{code}\n{fence}"
+                if self.pre_in_list:
+                    indent = "  " * len(self.list_stack)
+                    block = "\n".join(indent + line if line else "" for line in block.split("\n"))
+                    # Перевод строки отдельной частью: конец пункта не добавит к нему пустую строку.
+                    self._emit(block)
+                    self._emit("\n")
+                else:
+                    self._emit(block + "\n")
         elif tag == "a":
             href = self.links.pop() if self.links else ""
             self._emit(f"]({href})" if href and not self.old_inline else "]")
@@ -357,7 +377,23 @@ def _list(lines):
     """Вложенность по отступу в 2 пробела, как пишет html_to_md."""
     out = []
     stack = []  # [(тег, глубина)]
-    for number, line in enumerate(lines):
+    number = -1
+    while number + 1 < len(lines):
+        number += 1
+        line = lines[number]
+        fence = LIST_FENCE.match(line)
+        if fence and out:
+            # Блок кода с отступом принадлежит текущему пункту.
+            end = number + 1
+            while end < len(lines) and not (lines[end].strip().startswith(fence[2])
+                                             and not lines[end].strip().strip("`")):
+                end += 1
+            indent = len(fence[1])
+            code = [row[indent:] if row.startswith(" " * indent) else row.lstrip() for row in lines[number:end + 1]]
+            target = max(i for i, part in enumerate(out) if part.endswith("</li>"))
+            out[target] = out[target][:-len("</li>")] + md_to_html("\n".join(code)) + "</li>"
+            number = end
+            continue
         match = LIST_ITEM.match(line)
         if not match:
             # Продолжение предыдущего пункта; «  » в конце прошлой строки — перенос <br>.
@@ -447,7 +483,22 @@ def md_to_html(markdown):
             blocks.append("<blockquote>" + md_to_html("\n".join(group)) + "</blockquote>")
             continue
         if LIST_ITEM.match(line):
-            while index < len(lines) and lines[index].strip() and not lines[index].startswith("```"):
+            while index < len(lines):
+                fence = LIST_FENCE.match(lines[index])
+                if fence:
+                    # Блок кода пункта списка целиком, вместе с пустыми строками внутри.
+                    group.append(lines[index])
+                    index += 1
+                    while index < len(lines) and not (lines[index].strip().startswith(fence[2])
+                                                       and not lines[index].strip().strip("`")):
+                        group.append(lines[index])
+                        index += 1
+                    if index < len(lines):
+                        group.append(lines[index])
+                        index += 1
+                    continue
+                if not lines[index].strip() or lines[index].startswith("```"):
+                    break
                 group.append(lines[index])
                 index += 1
             blocks.append(_list(group))

@@ -130,6 +130,27 @@ class ListParagraphTests(unittest.TestCase):
         source = "<ul><li><code>a</code> — первое.<br>Пример: <code>b</code></li></ul>"
         self.assertEqual(md_to_html(html_to_md(source)), "<ul><li><code>a</code> — первое.<br>Пример: <code>b</code></li></ul>")
 
+    def test_code_block_inside_list_item(self):
+        source = ('<ol><li><strong>Шаг</strong>: запустите<pre style="background:#000;"><code class="language-python">'
+                  'a = 1\n\nprint(a)</code></pre></li><li>второй</li></ol>')
+        markdown = html_to_md(source)
+        self.assertEqual(markdown, '1. **Шаг**: запустите\n  ```python {style="background:#000;"}\n  a = 1\n\n'
+                                   '  print(a)\n  ```\n2. второй')
+        self.assertEqual(md_to_html(markdown), source)
+
+    def test_code_block_in_nested_list_and_text_after_it(self):
+        source = "<ul><li>a<ul><li>b<pre><code>x</code></pre></li></ul></li><li>c</li></ul>"
+        self.assertEqual(md_to_html(html_to_md(source)), source)
+
+    def test_paragraph_after_code_in_list_item(self):
+        source = "<ul><li><p>Пример:</p><pre><code>x</code></pre><p><strong>Вывод:</strong></p><pre><code>y</code></pre></li></ul>"
+        self.assertEqual(md_to_html(html_to_md(source)),
+                         "<ul><li>Пример:<pre><code>x</code></pre> <strong>Вывод:</strong><pre><code>y</code></pre></li></ul>")
+
+    def test_format_5_keeps_code_after_list(self):
+        markdown = html_to_md("<ul><li>a<pre><code>x</code></pre></li></ul>", fmt=5)
+        self.assertEqual(markdown, "- a\n\n```\nx\n```")
+
     def test_literal_asterisks_stay_text(self):
         markdown = html_to_md("<p>2**3 и a*b*c</p>")
         self.assertEqual(md_to_html(markdown), "<p>2**3 и a*b*c</p>")
