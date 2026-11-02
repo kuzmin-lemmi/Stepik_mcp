@@ -7,6 +7,7 @@
 ```bash
 python -m pip install -e ".[dev]"          # установка с инструментами разработки
 python -m unittest discover -s tests -v    # тесты (офлайн)
+STEPIK_LIVE=1 python -m unittest discover -s tests -p "test_live.py" -v   # живые проверки, ключи в .env, курс 241862
 python -m ruff check src tests             # линтер
 python -m stepik_mcp                       # запуск сервера через stdio
 ```

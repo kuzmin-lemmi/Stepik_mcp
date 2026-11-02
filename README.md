@@ -331,7 +331,15 @@ python -m unittest discover -s tests -v
 python -m ruff check src tests
 ```
 
-Тесты не ходят в сеть и не трогают настоящую папку курсов. CI запускает их на Windows и Linux с Python 3.12 и 3.13. Правила для агентов, которые работают над этим репозиторием, лежат в [AGENTS.md](AGENTS.md).
+Тесты не ходят в сеть и не трогают настоящую папку курсов. CI запускает их на Windows и Linux с Python 3.12 и 3.13.
+
+Живые проверки на настоящем Stepik (`tests/test_live.py`) по умолчанию пропускаются. Для запуска положите ключи в `.env` в корне репозитория (`STEPIK_CLIENT_ID=…`, `STEPIK_CLIENT_SECRET=…`; файл в `.gitignore`) и задайте `STEPIK_LIVE=1`:
+
+```bash
+STEPIK_LIVE=1 python -m unittest discover -s tests -p "test_live.py" -v
+```
+
+Они пишут только в тестовый курс `241862` и урок `2676604` (меняются переменными `STEPIK_LIVE_COURSE` и `STEPIK_LIVE_LESSON`), каждую правку откатывают к снимку и работают во временной папке. Правила для агентов, которые работают над этим репозиторием, лежат в [AGENTS.md](AGENTS.md).
 
 ## Документация
 
