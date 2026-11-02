@@ -116,8 +116,12 @@ class UpgradeTests(unittest.TestCase):
         for path in (self.folder / ".stepik" / "steps").glob("*.json"):
             path.unlink()
         self.data["step-sources"][1]["update_date"] = "2999-01-01T00:00:00Z"
+        # Файл совпадает с текущим Stepik: терять нечего, шаг переводится.
+        self.assertEqual(self.upgrade()["conflicts"], [])
+        self.data["step-sources"][1]["block"]["text"] = "<p>Шаг, изменённый на Stepik</p>"
         result = self.upgrade(apply=True)
         self.assertEqual(result["conflicts"][0]["step_id"], 12)
+        self.assertIn("format: 2", self.lesson.read_text(encoding="utf-8"))
 
 
 class MergeEditTests(unittest.TestCase):
