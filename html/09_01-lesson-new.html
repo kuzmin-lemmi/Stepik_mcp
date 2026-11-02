@@ -1,0 +1,1259 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 9.1. Фоновые задачи: бот действует сам</h2>
+
+<p><strong>Аннотация:</strong><br />
+После модуля 8 у ПривычкаБота есть всё для утреннего сообщения: привычки, отметки, город и погода. Нет одного &mdash; самого утра. Сообщение приходит, только когда пользователь отправит <code>/morning</code>. А время напоминания, которое бот спрашивает у каждой привычки с модуля 6, до сих пор ни на что не влияет.</p>
+
+<p>Сегодня бот впервые начнёт писать первым. В 07:30 он сам пришлёт каждому утреннее сообщение с погодой, а в назначенное время &mdash; напоминание о привычке с кнопкой отметки.</p>
+
+<blockquote><strong>🛠 Как устроен урок:</strong><br />
+Разделы 2&ndash;3 &mdash; в папке <code>bg_lab</code> вне проекта, как лаборатории прошлых модулей. С раздела 4 меняем ПривычкаБот: новые файлы <code>clock.py</code> и <code>reminders.py</code>, таблица <code>sent</code> в базе, одна строка в <code>bot.py</code>. Бот работает после каждого раздела, а начинает писать сам после раздела 9.</blockquote>
+
+<blockquote><strong>🎯 Цель урока:</strong><br />
+&bull; Понять, почему хэндлеры не могут прислать сообщение по времени, &mdash; <strong>раздел 1</strong><br />
+&bull; Запустить бесконечную корутину рядом с ботом через <code>create_task()</code> &mdash; <strong>раздел 2</strong><br />
+&bull; Проверять расписание раз в минуту &mdash; <strong>раздел 3</strong><br />
+&bull; Отделить логику от цикла, чтобы проверять её без ожидания утра, &mdash; <strong>раздел 4</strong><br />
+&bull; Решить, кому пора, и не потерять напоминание при перезапуске &mdash; <strong>раздел 5 и задача</strong><br />
+&bull; Перевести бота на один часовой пояс &mdash; <strong>раздел 6</strong><br />
+&bull; Не отправить одно напоминание дважды &mdash; <strong>раздел 7</strong><br />
+&bull; Собрать <code>reminders.py</code> и запустить цикл вместе с ботом &mdash; <strong>разделы 8&ndash;9</strong></blockquote>
+
+<h2>⏰ 1. Кто напишет в 07:30?</h2>
+
+<p>Вспомните, как работает каждый хэндлер ПривычкаБота. Аня отправила <code>/today</code> &mdash; хэндлер ответил. Нажала кнопку &mdash; хэндлер изменил сообщение. Всё, что делает бот, &mdash; ответ на чьё-то действие. Хэндлер вызывается, когда приходит обновление от Telegram, и только тогда.</p>
+
+<p>В 07:30 Аня спит. Обновлений нет, и ни один хэндлер не вызовется. Чтобы сообщение пришло, у бота должна быть ещё одна работа, не связанная с обновлениями: следить за часами.</p>
+
+<pre><code>хэндлеры        ждут обновлений от Telegram  &rarr;  отвечают
+новая работа    следит за часами             &rarr;  пишет сама, когда пора</code></pre>
+
+<p>Обе работы должны идти одновременно: пока бот ждёт 07:30, он продолжает отвечать на <code>/today</code>. Модуль 3 научил нас именно этому &mdash; нескольким корутинам в одном event loop.</p>
+
+<h3>Что бот будет присылать</h3>
+
+<ul>
+	<li><strong>Утреннее сообщение</strong> &mdash; в 07:30, каждому, у кого есть привычки. Текст собирает <code>build_morning_text()</code> из урока 8.4 без изменений.</li>
+	<li><strong>Напоминание о привычке</strong> &mdash; в её <code>remind_time</code>: &laquo;⏰ Пора: Растяжка&raquo; и кнопка отметки. Если привычка уже отмечена сегодня, напоминать не о чем.</li>
+</ul>
+
+<h3>Что меняется в проекте</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Файл</th>
+			<th>Было после 8.4</th>
+			<th>Станет</th>
+		</tr>
+		<tr>
+			<td><code>clock.py</code></td>
+			<td>&mdash;</td>
+			<td><strong>новый</strong>: часовой пояс бота, <code>now()</code> и <code>today()</code></td>
+		</tr>
+		<tr>
+			<td><code>reminders.py</code></td>
+			<td>&mdash;</td>
+			<td><strong>новый</strong>: <code>is_due()</code> из задачи, <code>deliver()</code>, <code>send_due()</code>, <code>reminder_loop()</code></td>
+		</tr>
+		<tr>
+			<td><code>database.py</code></td>
+			<td>таблицы <code>habits</code>, <code>marks</code>, <code>users</code></td>
+			<td>таблица <code>sent</code>; добавятся <code>mark_sent()</code>, <code>get_all_habits()</code>, <code>get_user_ids()</code></td>
+		</tr>
+		<tr>
+			<td><code>handlers/habits.py</code></td>
+			<td><code>date.today()</code> в шести хэндлерах</td>
+			<td><code>clock.today()</code></td>
+		</tr>
+		<tr>
+			<td><code>keyboards.py</code>, <code>texts.py</code></td>
+			<td>&mdash;</td>
+			<td><code>reminder_keyboard()</code>, <code>REMINDER</code></td>
+		</tr>
+		<tr>
+			<td><code>bot.py</code></td>
+			<td>опрос Telegram</td>
+			<td>перед опросом запускается цикл напоминаний</td>
+		</tr>
+	</tbody>
+</table>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>🔁 2. Бесконечная корутина рядом с ботом</h2>
+
+<p>Работа &laquo;следить за часами&raquo; никогда не заканчивается: проверила &mdash; подождала &mdash; проверила снова. В коде это бесконечный цикл с ожиданием внутри. Проверим, как он уживается с хэндлерами, на модели из модуля 3.</p>
+
+<p>Создайте папку <code>bg_lab</code> рядом с прошлыми лабораториями, а в ней <code>loop_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+import time
+
+START = time.monotonic()
+
+
+def log(text: str) -&gt; None:
+    print(f"[{time.monotonic() - START:4.2f}s] {text}")
+
+
+async def reminder_loop() -&gt; None:
+    while True:
+        log("фон: проверяю, кому пора")
+        await asyncio.sleep(1)
+
+
+async def handler(name: str, delay: float) -&gt; None:
+    await asyncio.sleep(delay)
+    log(f"{name}: пришло сообщение")
+    await asyncio.sleep(0.1)
+    log(f"{name}: бот ответил")
+
+
+async def main() -&gt; None:
+    task = asyncio.create_task(reminder_loop())
+    await asyncio.gather(handler("Аня", 0.5), handler("Борис", 1.5))
+    log("опрос закончен")
+
+
+asyncio.run(main())</code></pre>
+
+<p><code>log()</code> &mdash; знакомая по урокам 3.3 и 8.1 печать со временем от старта. <code>reminder_loop()</code> раз в секунду &laquo;проверяет расписание&raquo;. <code>handler()</code> изображает хэндлер: сообщение пришло через <code>delay</code> секунд, ответ ушёл через 0.1. А <code>gather()</code> из двух хэндлеров играет роль опроса Telegram: пока он идёт, бот работает.</p>
+
+<p>Запустите <code>python loop_demo.py</code>:</p>
+
+<pre><code>[0.00s] фон: проверяю, кому пора
+[0.50s] Аня: пришло сообщение
+[0.60s] Аня: бот ответил
+[1.00s] фон: проверяю, кому пора
+[1.50s] Борис: пришло сообщение
+[1.60s] Борис: бот ответил
+[1.60s] опрос закончен</code></pre>
+
+<p>Строки фона и хэндлеров перемешаны. Аня получила ответ через 0.1 секунды после сообщения, хотя рядом крутится бесконечный цикл. Цикл тоже не останавливался: проверка на 0.00 и на 1.00. Каждый <code>await asyncio.sleep()</code> отдаёт управление event loop, и тот переключается туда, где есть работа.</p>
+
+<p>Обратите внимание на последнюю строку. Когда <code>main()</code> закончилась, <code>asyncio.run()</code> сам отменил оставшиеся задачи &mdash; и бесконечный цикл с ними. В боте так и будет: остановили бота &mdash; остановились напоминания.</p>
+
+<h3>Почему create_task(), а не await</h3>
+
+<p>Хочется написать проще: <code>await reminder_loop()</code>. Замените первую строку <code>main()</code> на эту и запустите:</p>
+
+<pre><code>[0.00s] фон: проверяю, кому пора
+[1.00s] фон: проверяю, кому пора
+[2.00s] фон: проверяю, кому пора
+[3.00s] фон: проверяю, кому пора
+&lt;&lt;TIMEOUT&gt;&gt;</code></pre>
+<!-- АВТОР: программа остановлена через 3,6 с вручную &mdash; сама она не завершается -->
+
+<p>Ни Аня, ни Борис не дождались ответа. <code>await</code> означает &laquo;дождись, пока закончится&raquo;. Бесконечный цикл не закончится никогда, и до строки с <code>gather()</code> дело не дойдёт. В боте это значит: до <code>start_polling()</code> выполнение не дойдёт, и бот не ответит ни на одну команду.</p>
+
+<p><code>asyncio.create_task()</code> из урока 3.2 делает другое: ставит корутину в event loop и сразу возвращает управление. Цикл работает сам по себе, а <code>main()</code> идёт дальше.</p>
+
+<pre><code>await reminder_loop()                     &rarr;  ждать, пока цикл закончится (никогда)
+task = asyncio.create_task(reminder_loop())  &rarr;  запустить цикл и идти дальше</code></pre>
+
+<p>Верните строку с <code>create_task()</code>.</p>
+
+<h3>Зачем task =</h3>
+
+<p>Переменная <code>task</code> дальше нигде не используется. Её можно было бы не заводить &mdash; но так делать не стоит. Event loop хранит на задачу только слабую ссылку, которая не мешает Python удалить объект. Если других ссылок нет, задачу может удалить сборщик мусора посреди работы. Документация <code>asyncio</code> прямо советует сохранять результат <code>create_task()</code> в переменную.</p>
+
+<blockquote><strong>🔑 Фоновая работа &mdash; через create_task():</strong><br />
+Бесконечный цикл с <code>await asyncio.sleep()</code> внутри, запущенный через <code>create_task()</code>, работает рядом с хэндлерами и не мешает им. Результат <code>create_task()</code> сохраняем в переменную.</blockquote>
+
+
+<!-- ═══ ШАГ 3 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В <code>reminder_loop()</code> из <code>loop_demo.py</code> заменили <code>await asyncio.sleep(1)</code> на <code>time.sleep(1)</code>. Что станет с хэндлерами Ани и Бориса?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Они не ответят никогда: цикл не отдаёт управление event loop ✅</li>
+	<li>Ответят с задержкой до секунды: цикл отдаёт управление раз в секунду</li>
+	<li>Ничего не изменится: цикл запущен через <code>create_task()</code></li>
+	<li>Программа упадёт с ошибкой: <code>time.sleep()</code> нельзя вызывать в корутине</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Мы проверили: в выводе только строки &laquo;фон: проверяю, кому пора&raquo;, раз в секунду, а хэндлеры не напечатали ничего. <code>time.sleep()</code> &mdash; блокировка из урока 3.3, и в бесконечном цикле она бесконечна.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните урок 3.3: отдаёт ли <code>time.sleep()</code> управление event loop? А в цикле <code>while True</code> есть ли хоть одна строка, где управление вернётся?</p>
+
+
+<!-- ═══ ШАГ 4 · text · новый шаг ═══ -->
+
+<h2>🕐 3. Раз в минуту</h2>
+
+<p>Время напоминаний в ПривычкаБоте &mdash; с точностью до минуты: <code>07:30</code>, <code>21:00</code>. Значит, проверять расписание чаще раза в минуту незачем. Но и <code>asyncio.sleep(60)</code> не совсем то, что нужно.</p>
+
+<p>Пусть бот запустили в 07:29:42. Первая проверка &mdash; сразу, следующая через 60 секунд, в 07:30:42. Ещё через 60 &mdash; в 07:31:42. Проверка каждый раз приходит в середину минуты, а каждая проверка ещё и сама занимает время, поэтому сдвиг понемногу растёт.</p>
+
+<p>Лучше спать не 60 секунд, а до начала следующей минуты:</p>
+
+<pre><code>await asyncio.sleep(60 - clock.now().second)</code></pre>
+
+<pre><code>сейчас 07:29:42   &rarr;   60 - 42 = 18 секунд   &rarr;   проснёмся в 07:30:00
+сейчас 07:30:01   &rarr;   60 - 1  = 59 секунд   &rarr;   проснёмся в 07:31:00</code></pre>
+
+<p>Проверки прилипают к началу минуты. Что такое <code>clock.now()</code>, разберём в разделе 6, пока это &laquo;сейчас&raquo;.</p>
+
+<h2>🧩 4. Логика отдельно от цикла</h2>
+
+<p>Перед тем как писать проверку, решим, как мы будем её проверять. Если вся логика сидит внутри бесконечного цикла, проверка &laquo;пришло ли утреннее сообщение&raquo; выглядит так: запустить бота и ждать 07:30. Ошиблись &mdash; исправить и ждать до завтра.</p>
+
+<p>Поэтому разделим. Цикл ничего не решает: он только узнаёт текущее время и передаёт его функции, а функция решает, кому и что отправить.</p>
+
+<pre><code>reminder_loop(bot)          &rarr;  каждую минуту: send_due(bot, сейчас)
+send_due(bot, now)          &rarr;  кому пора на момент now &mdash; тем отправить</code></pre>
+
+<p>Главное здесь &mdash; что <code>send_due()</code> получает время аргументом, а не узнаёт сама. Тогда её можно вызвать с любым временем: &laquo;представь, что сейчас 07:30&raquo; &mdash; и посмотреть, что она отправит. Без ожидания утра.</p>
+
+<p>Это та же идея, что в уроке 8.4: <code>build_morning_text(user_id, day)</code> получает дату аргументом и не зависит от сообщения. Функции, которые получают всё нужное через аргументы, легко проверять и легко вызывать из разных мест.</p>
+
+<blockquote><strong>🔑 Время &mdash; аргументом:</strong><br />
+Цикл знает, когда проверять. Функция знает, что делать в момент <code>now</code>. Функцию с временем в аргументе можно проверить для любого часа, не дожидаясь его.</blockquote>
+
+
+<!-- ═══ ШАГ 5 · text · новый шаг ═══ -->
+
+<h2>🎯 5. Кому пора</h2>
+
+<p>Проверка идёт в начале каждой минуты. У привычки есть <code>remind_time</code>, например <code>"21:00"</code>. Когда отправлять напоминание?</p>
+
+<h3>Попытка 1: время совпало</h3>
+
+<p>Первое, что приходит в голову: отправлять, когда текущее время равно времени привычки.</p>
+
+<pre><code>now.strftime("%H:%M") == remind_time</code></pre>
+
+<p>В обычный день это работает. Но представьте: в 20:59 бот перезапустили, на запуск ушло полторы минуты. Первая проверка &mdash; в 21:01. Время уже не равно <code>"21:00"</code>, и сегодня Аня напоминания не получит. Так же пропадёт напоминание, если проверка в 21:00 задержалась: например, из-за медленного сервиса погоды утренняя рассылка заняла больше минуты.</p>
+
+<h3>Попытка 2: время прошло</h3>
+
+<p>Тогда наоборот: отправлять, если время привычки уже наступило.</p>
+
+<pre><code>remind_time &lt;= now.strftime("%H:%M")</code></pre>
+
+<p>Сравнение строк здесь работает правильно: <code>"07:05" &lt; "07:30" &lt; "21:00"</code>. Python сравнивает строки посимвольно, а все времена записаны одинаково, двумя цифрами. Это заслуга <code>parse_time()</code> из урока 6.3: она превращала &laquo;7:5&raquo; в &laquo;07:05&raquo;. С записью &laquo;7:5&raquo; сравнение бы сломалось: <code>"7:5" &gt; "21:00"</code>, потому что <code>"7"</code> больше <code>"2"</code>.</p>
+
+<p>Но у второй попытки другая беда. Бота запустили в 22:00 &mdash; например, впервые, на новом сервере. Для каждой привычки этого дня время уже прошло, и бот разом пришлёт все напоминания с утра. Утреннее сообщение &mdash; в десять вечера.</p>
+
+<h3>Окно</h3>
+
+<p>Нужна середина: напоминание пора отправить, если его время наступило, но прошло не слишком много. Назовём этот запас <code>CATCH_UP</code> &mdash; 15 минут:</p>
+
+<pre><code>    21:00                    21:15
+------|=========================|------------&rarr;  время
+      ^ пора                    ^ поздно, пропускаем
+
+планировалось  &le;  сейчас  &lt;  планировалось + CATCH_UP</code></pre>
+
+<p>Перезапуск в 21:01 &mdash; напоминание догонит. Запуск в 22:00 &mdash; старые напоминания уже вне окна, лавины не будет. А что окно длиной 15 минут не даст отправить напоминание 15 раз подряд, разберём в разделе 7.</p>
+
+<h3>Сравниваем время, а не строки</h3>
+
+<p>&laquo;Плюс 15 минут&raquo; к строке не прибавить. Поэтому в окне сравниваем не строки, а объекты <code>datetime</code>. Из <code>"21:00"</code> и текущего момента получаем &laquo;сегодня в 21:00&raquo;. Для этого у <code>datetime</code> есть метод <code>replace()</code>: он возвращает копию, в которой заменены указанные части.</p>
+
+<pre><code>now = datetime(2026, 11, 2, 21, 3, 27)
+now.replace(hour=21, minute=0, second=0, microsecond=0)   &rarr;   2026-11-02 21:00:00</code></pre>
+
+<p>Секунды и микросекунды тоже обнуляем: иначе в копию перейдут <code>27</code> секунд из текущего времени. Прибавлять к <code>datetime</code> промежуток <code>timedelta</code> вы умеете с урока 7.1.</p>
+
+<p>Эту проверку вы напишете в задаче 1 &mdash; функцию <code>is_due()</code>. Она войдёт в <code>reminders.py</code> без изменений.</p>
+
+<blockquote><strong>🔑 Пора &mdash; это окно, а не точка:</strong><br />
+Напоминание отправляется, если его время наступило не больше 15 минут назад. Так перезапуск бота не теряет напоминания и не присылает старые.</blockquote>
+
+
+<!-- ═══ ШАГ 6 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Бот проверяет напоминания условием <code>remind_time &lt;= now.strftime("%H:%M")</code>, без окна. Бота впервые запустили в 22:00. У Ани привычки на 08:00 и 21:00. Что произойдёт при первой проверке?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Аня сразу получит оба напоминания: время обоих уже прошло ✅</li>
+	<li>Аня не получит ничего: оба времени не совпадают с 22:00</li>
+	<li>Аня получит только напоминание на 21:00 как самое близкое</li>
+	<li>Ошибка: строки нельзя сравнивать знаком <code>&lt;=</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. <code>"08:00" &lt;= "22:00"</code> и <code>"21:00" &lt;= "22:00"</code> &mdash; оба условия истинны. Окно <code>CATCH_UP</code> отсекает напоминания, время которых прошло давно.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Сравните строки посимвольно: <code>"08:00"</code> и <code>"22:00"</code>, <code>"21:00"</code> и <code>"22:00"</code>. Какие условия истинны? Есть ли в проверке что-то, что ограничивает &laquo;слишком давно&raquo;?</p>
+
+
+<!-- ═══ ШАГ 7 · code · новый шаг ═══ -->
+
+<h3>✍️ Задача 1. Пора ли напомнить</h3>
+
+<p><strong>Уровень:</strong> ⭐⭐ Basic</p>
+
+<p>Эта функция решает, отправлять ли напоминание прямо сейчас. В разделе 8 её вызовет <code>send_due()</code> для каждой привычки и для утреннего сообщения, и в <code>reminders.py</code> она войдёт без изменений.</p>
+
+<p>Напишите функцию <code>is_due(remind_time, now)</code>, которая возвращает <code>True</code>, если время напоминания наступило не больше <code>CATCH_UP</code> назад. Константа <code>CATCH_UP</code> уже есть в шаблоне.</p>
+
+<p><strong>Важно:</strong> нужно написать только функцию. Не используйте <code>input()</code> и <code>print()</code> внутри решения.</p>
+
+<h4>✅ Что должна делать функция</h4>
+
+<ul>
+	<li><code>remind_time</code> &mdash; строка <code>"ЧЧ:ММ"</code>, всегда две цифры часов и две цифры минут</li>
+	<li><code>now</code> &mdash; текущий момент, объект <code>datetime</code>; может содержать секунды и часовой пояс</li>
+	<li>Получить &laquo;сегодня в <code>remind_time</code>&raquo;: <code>now</code> с заменёнными часами и минутами, секунды и микросекунды &mdash; ноль</li>
+	<li>Вернуть <code>True</code>, если это время &le; <code>now</code> и <code>now</code> &lt; это время + <code>CATCH_UP</code></li>
+	<li>Иначе вернуть <code>False</code></li>
+</ul>
+
+<h4>💡 Примеры</h4>
+
+<p>Для краткости в примерах <code>d = datetime</code>.</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Вызов</th>
+			<th>Результат</th>
+			<th>Почему</th>
+		</tr>
+		<tr>
+			<td><code>is_due("07:30", d(2026, 11, 2, 7, 30))</code></td>
+			<td><code>True</code></td>
+			<td>Время наступило только что</td>
+		</tr>
+		<tr>
+			<td><code>is_due("07:30", d(2026, 11, 2, 7, 29, 59))</code></td>
+			<td><code>False</code></td>
+			<td>Ещё не наступило</td>
+		</tr>
+		<tr>
+			<td><code>is_due("07:30", d(2026, 11, 2, 7, 44, 59))</code></td>
+			<td><code>True</code></td>
+			<td>Прошло меньше 15 минут</td>
+		</tr>
+		<tr>
+			<td><code>is_due("07:30", d(2026, 11, 2, 7, 45))</code></td>
+			<td><code>False</code></td>
+			<td>Прошло ровно 15 минут &mdash; поздно</td>
+		</tr>
+		<tr>
+			<td><code>is_due("07:30", d(2026, 11, 2, 21, 0))</code></td>
+			<td><code>False</code></td>
+			<td>Утро давно прошло</td>
+		</tr>
+	</tbody>
+</table>
+
+<h4>🔍 На чём споткнётся неверное решение</h4>
+
+<ul>
+	<li>Сравнение строк на равенство, <code>now.strftime("%H:%M") == remind_time</code>, сойдётся на первых примерах и вернёт <code>False</code> для 07:44:59.</li>
+	<li>Проверка без верхней границы, <code>planned &lt;= now</code>, вернёт <code>True</code> для 07:45 и для 21:00.</li>
+	<li>Решение, которое сравнивает строки <code>remind_time &lt;= now.strftime("%H:%M")</code>, тоже не знает о верхней границе.</li>
+</ul>
+
+<details><summary>💡 Подсказка</summary>
+
+<p>Разделите строку по двоеточию, как в <code>parse_time()</code> урока 6.3, и превратите части в числа.</p>
+
+<p><code>now.replace(hour=..., minute=..., second=0, microsecond=0)</code> даёт &laquo;сегодня в это время&raquo;, с тем же часовым поясом, что у <code>now</code>. Двойное сравнение в Python пишется подряд: <code>a &lt;= x &lt; b</code>.</p>
+</details>
+
+<!-- ↓ шаблон, тесты и эталон &mdash; в поля Stepik ↓ -->
+
+<p><strong>Шаблон (python3.12), <code>::code</code>:</strong></p>
+
+<pre><code>from datetime import datetime, timedelta
+
+CATCH_UP = timedelta(minutes=15)
+
+
+def is_due(remind_time, now):
+    pass</code></pre>
+
+<p><strong><code>::footer</code>:</strong></p>
+
+<pre><code>import sys
+exec(sys.stdin.read())</code></pre>
+
+<p><strong>Тест 1:</strong></p>
+<pre><code>from datetime import datetime
+d = datetime
+print(is_due("07:30", d(2026, 11, 2, 7, 30)))
+print(is_due("07:30", d(2026, 11, 2, 7, 30, 40)))
+print(is_due("07:30", d(2026, 11, 2, 7, 29, 59)))
+print(is_due("08:00", d(2026, 11, 2, 7, 30)))</code></pre>
+<p><strong>Вывод:</strong></p>
+<pre><code>True
+True
+False
+False</code></pre>
+
+<p><strong>Тест 2:</strong></p>
+<pre><code>from datetime import datetime
+d = datetime
+print(is_due("07:30", d(2026, 11, 2, 7, 44, 59)))
+print(is_due("07:30", d(2026, 11, 2, 7, 45)))
+print(is_due("07:30", d(2026, 11, 2, 21, 0)))
+print(is_due("21:00", d(2026, 11, 2, 21, 3)))</code></pre>
+<p><strong>Вывод:</strong></p>
+<pre><code>True
+False
+False
+True</code></pre>
+
+<p><strong>Тест 3 (скрытый):</strong></p>
+<pre><code>from datetime import datetime
+from zoneinfo import ZoneInfo
+d = datetime
+print(is_due("00:00", d(2026, 11, 2, 0, 0)))
+print(is_due("23:50", d(2026, 11, 2, 23, 59, 59)))
+print(is_due("23:50", d(2026, 11, 3, 0, 2)))
+print(is_due("07:05", d(2026, 11, 2, 7, 5, tzinfo=ZoneInfo("Europe/Moscow"))))
+print(is_due("09:00", d(2026, 11, 2, 9, 14, 59, 999999)))
+print(type(is_due("07:30", d(2026, 11, 2, 7, 30))).__name__)</code></pre>
+<p><strong>Вывод:</strong></p>
+<pre><code>True
+True
+False
+True
+True
+bool</code></pre>
+
+<p><strong>Эталон:</strong></p>
+
+<pre><code class="language-python">from datetime import datetime, timedelta
+
+CATCH_UP = timedelta(minutes=15)
+
+
+def is_due(remind_time: str, now: datetime) -&gt; bool:
+    hours, minutes = remind_time.split(":")
+    planned = now.replace(
+        hour=int(hours), minute=int(minutes), second=0, microsecond=0
+    )
+    return planned &lt;= now &lt; planned + CATCH_UP</code></pre>
+
+
+<!-- ═══ ШАГ 8 · text · новый шаг ═══ -->
+
+<h2>🌍 6. Один часовой пояс для бота</h2>
+
+<p>В разделе 3 мы писали <code>clock.now()</code>, а не <code>datetime.now()</code>. Причина &mdash; в модуле 9 бот переедет на сервер. Посмотрим, чем это грозит.</p>
+
+<p>Создайте в <code>bg_lab</code> файл <code>tz_demo.py</code>:</p>
+
+<pre><code class="language-python">from datetime import datetime
+from zoneinfo import ZoneInfo
+
+print("datetime.now():           ", datetime.now().strftime("%H:%M"))
+print("по Москве:                ", datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M"))
+print("по Гринвичу (UTC):        ", datetime.now(ZoneInfo("UTC")).strftime("%H:%M"))</code></pre>
+
+<p><code>ZoneInfo("Europe/Moscow")</code> &mdash; часовой пояс из встроенного модуля <code>zoneinfo</code>. <code>datetime.now()</code> с часовым поясом в скобках возвращает время в этом поясе. Без скобок &mdash; время того компьютера, на котором запущена программа.</p>
+
+<p>Запустите <code>python tz_demo.py</code>. На компьютере в Москве:</p>
+
+<pre><code>datetime.now():            18:35
+по Москве:                 18:35
+по Гринвичу (UTC):         15:35</code></pre>
+
+<p>Первые две строки совпадают: компьютер живёт по московскому времени. А теперь та же программа на сервере. Серверы почти всегда настроены на UTC &mdash; время по Гринвичу, без поясов и переходов. Мы запустили её с часовым поясом сервера:</p>
+
+<pre><code>datetime.now():            15:35
+по Москве:                 18:35
+по Гринвичу (UTC):         15:35</code></pre>
+<!-- АВТОР: запуск с переменной окружения TZ=UTC, как на типичном VPS; в 9.2 ученик увидит это через timedatectl -->
+
+<p><code>datetime.now()</code> на сервере отстаёт на три часа. Если бот сравнивает напоминания с ним, Аня получит утреннее сообщение в 10:30. А <code>date.today()</code> в хэндлерах сломается тише: с 21:00 до полуночи по Москве на сервере ещё вчера, и отметка на <code>/today</code> уйдёт во вчерашний день.</p>
+
+<h3>clock.py</h3>
+
+<p>Часы бота должны показывать одно время, где бы он ни работал. Соберём их в одном месте. Создайте в папке проекта <code>clock.py</code>:</p>
+
+<pre><code class="language-python">"""Время бота: один часовой пояс для всех его часов."""
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+TIMEZONE = ZoneInfo("Europe/Moscow")
+
+
+def now() -&gt; datetime:
+    return datetime.now(TIMEZONE)
+
+
+def today() -&gt; date:
+    return now().date()</code></pre>
+
+<p>Две функции на весь проект: <code>now()</code> &mdash; текущий момент, <code>today()</code> &mdash; сегодняшняя дата, обе по Москве. Если ваши пользователи живут в другом поясе, поменяйте одну строку <code>TIMEZONE</code>.</p>
+
+<p>Теперь замените в <code>handlers/habits.py</code> все <code>date.today()</code> на <code>clock.today()</code>. Их шесть: в <code>cmd_today</code>, <code>cmd_list</code>, <code>cmd_stats</code>, <code>switch_page</code>, <code>toggle_habit_from_list</code> и <code>cmd_morning</code>. Поиск в VS Code (<code>Ctrl+F</code>) по <code>date.today()</code> найдёт все. И добавьте импорт:</p>
+
+<pre><code class="language-python">import clock
+import database
+import keyboards
+import texts
+import weather</code></pre>
+
+<p>Строку <code>from datetime import date, timedelta</code> не трогайте: <code>date</code> нужен в аннотациях, <code>timedelta</code> &mdash; в <code>cmd_stats</code>.</p>
+
+<h3>Windows: пакет tzdata</h3>
+
+<p>На Linux и macOS часовые пояса хранит сама система. В Windows такой базы нет, и <code>zoneinfo</code> её не найдёт:</p>
+
+<pre><code>Traceback (most recent call last):
+  File "tz_demo.py", line 5, in &lt;module&gt;
+    print("по Москве:                ", datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M"))
+  ...
+zoneinfo._common.ZoneInfoNotFoundError: 'No time zone found with key Europe/Moscow'</code></pre>
+<!-- АВТОР: получено на Linux с отключённой системной базой поясов (PYTHONTZPATH) и без tzdata &mdash; так zoneinfo ведёт себя на Windows -->
+
+<p>Базу поясов можно поставить отдельным пакетом. Поставьте его и запишите в <code>requirements.txt</code> на любой системе: так окружение будет одинаковым у всех, а сервер в 9.2 поставит пакет вместе с остальными.</p>
+
+<pre><code>python -m pip install tzdata
+python -m pip freeze &gt; requirements.txt</code></pre>
+
+<h4>🔍 Проверка</h4>
+
+<pre><code>python -c "import clock; print(clock.now()); print(clock.today())"</code></pre>
+
+<pre><code>2026-11-01 18:35:54.842822+03:00
+2026-11-01</code></pre>
+
+<p><code>+03:00</code> в конце &mdash; смещение от UTC, то есть время московское. Мы проверили ту же команду с часовым поясом сервера: вывод тот же, <code>+03:00</code>. Перезапустите бота и откройте <code>/today</code> &mdash; экран работает как раньше.</p>
+
+<blockquote><strong>🔑 Время бота &mdash; из одного места:</strong><br />
+<code>clock.now()</code> и <code>clock.today()</code> показывают время в поясе бота, а не компьютера. <code>datetime.now()</code> и <code>date.today()</code> в коде бота больше не используем.</blockquote>
+
+
+<!-- ═══ ШАГ 9 · text · новый шаг ═══ -->
+
+<h2>🧾 7. Не отправить дважды: таблица sent</h2>
+
+<p>Окно из раздела 5 длится 15 минут, а проверка идёт каждую минуту. Значит, условие <code>is_due()</code> будет истинным пятнадцать проверок подряд. Без защиты Аня получит пятнадцать утренних сообщений.</p>
+
+<p>Боту нужно помнить, что он уже отправил сегодня. Держать это в памяти нельзя: перезапуск сотрёт её, и бот отправит всё ещё раз. Запишем в базу.</p>
+
+<h3>Шаг 1. Таблица</h3>
+
+<p>Добавьте в <code>CREATE_TABLES</code> в <code>database.py</code>, после таблицы <code>users</code>:</p>
+
+<pre><code class="language-python">CREATE TABLE IF NOT EXISTS sent (
+    user_id INTEGER NOT NULL,
+    kind    TEXT    NOT NULL,
+    day     TEXT    NOT NULL,
+    UNIQUE (user_id, kind, day)
+);</code></pre>
+
+<ul>
+	<li><code>kind</code> &mdash; что отправлено: <code>"morning"</code> для утреннего сообщения, <code>"habit_3"</code> для напоминания о привычке с номером 3;</li>
+	<li><code>day</code> &mdash; за какой день, строкой <code>"2026-11-02"</code>, как <code>marked_date</code> в таблице <code>marks</code>;</li>
+	<li><code>UNIQUE (user_id, kind, day)</code> &mdash; одно сообщение одного вида одному пользователю в один день. Вторую такую строку база не примет.</li>
+</ul>
+
+<h3>Шаг 2. mark_sent()</h3>
+
+<p>Нужна функция, которая отвечает на вопрос &laquo;можно отправлять?&raquo; и сразу записывает ответ. Добавьте в конец <code>database.py</code>:</p>
+
+<pre><code class="language-python">async def mark_sent(user_id: int, kind: str, day: date) -&gt; bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO sent (user_id, kind, day) VALUES (?, ?, ?) "
+            "ON CONFLICT DO NOTHING",
+            (user_id, kind, day.isoformat()),
+        )
+        await db.commit()
+    return cursor.rowcount == 1</code></pre>
+
+<p><code>ON CONFLICT DO NOTHING</code> &mdash; младший брат <code>ON CONFLICT DO UPDATE</code> из урока 8.4: если такая строка уже есть, ничего не делать. А <code>rowcount</code> &mdash; знакомый по <code>toggle_mark()</code> из урока 7.2 счётчик затронутых строк.</p>
+
+<pre><code>первый вызов за день    &rarr;  строка вставлена   &rarr;  rowcount = 1  &rarr;  True: отправляй
+повторный вызов         &rarr;  конфликт, пропуск  &rarr;  rowcount = 0  &rarr;  False: уже было</code></pre>
+
+<p>Проверка и запись &mdash; одним запросом. Если проверить отдельно (&laquo;есть ли строка?&raquo;), а записать потом, между ними может вклиниться второй вызов &mdash; та же гонка, что с двойным нажатием &laquo;Сохранить&raquo; в уроке 6.4.</p>
+
+<h3>Сначала отметить, потом отправить</h3>
+
+<p>В <code>send_due()</code> порядок будет такой: <code>mark_sent()</code>, затем отправка. Если отправка не удастся, сообщение уже отмечено и повторно не уйдёт. Это осознанный выбор, как в уроке 8.3: не повторяем то, что не получилось. Пропущенное напоминание лучше, чем пятнадцать одинаковых.</p>
+
+<h3>Шаг 3. Два запроса для рассылки</h3>
+
+<p>Циклу нужны привычки всех пользователей, а для утреннего сообщения &mdash; список тех, у кого есть привычки. Добавьте в конец <code>database.py</code>:</p>
+
+<pre><code class="language-python">async def get_all_habits() -&gt; list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, user_id, name, remind_time FROM habits ORDER BY id"
+        )
+        rows = await cursor.fetchall()
+    return [dict(row) for row in rows]</code></pre>
+
+<pre><code class="language-python">async def get_user_ids() -&gt; list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT DISTINCT user_id FROM habits ORDER BY user_id"
+        )
+        rows = await cursor.fetchall()
+
+    user_ids = []
+    for row in rows:
+        user_ids.append(row[0])
+    return user_ids</code></pre>
+
+<p>Это первые функции в <code>database.py</code> без <code>user_id</code> в аргументах: им нужны данные всех пользователей сразу. Вызывать их из хэндлеров не нужно &mdash; только из рассылки. <code>DISTINCT</code> убирает повторы: у Ани две привычки, но в списке она одна.</p>
+
+<blockquote><strong>🔑 Отправленное помнит база:</strong><br />
+<code>UNIQUE</code> в таблице <code>sent</code> и <code>ON CONFLICT DO NOTHING</code> в <code>mark_sent()</code> пропускают одно сообщение одного вида в день &mdash; при любом числе проверок и перезапусков.</blockquote>
+
+
+<!-- ═══ ШАГ 10 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В 07:30 Аня получила утреннее сообщение. В 07:31 бота перезапустили. Что произойдёт при проверке в 07:32?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Ничего: <code>is_due()</code> вернёт <code>True</code>, но <code>mark_sent()</code> вернёт <code>False</code> &mdash; строка за сегодня уже есть ✅</li>
+	<li>Аня получит сообщение второй раз: после перезапуска бот всё забыл</li>
+	<li>Ничего: <code>is_due()</code> вернёт <code>False</code>, потому что 07:32 не равно 07:30</li>
+	<li>Ошибка <code>IntegrityError</code>: строка с таким ключом уже есть</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Отметка лежит в базе и переживает перезапуск. А <code>ON CONFLICT DO NOTHING</code> превращает повторную вставку из ошибки в тихий <code>rowcount = 0</code>.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Где хранится отметка &laquo;уже отправлено&raquo; &mdash; в памяти или в базе? Попадает ли 07:32 в окно 07:30&ndash;07:45? Что делает <code>ON CONFLICT DO NOTHING</code> вместо ошибки?</p>
+
+
+<!-- ═══ ШАГ 11 · text · новый шаг ═══ -->
+
+<h2>📬 8. reminders.py</h2>
+
+<p>Все части готовы: <code>is_due()</code>, <code>mark_sent()</code>, запросы и <code>build_morning_text()</code>. Соберём их в модуле рассылки.</p>
+
+<h3>Шаг 1. Текст и кнопка напоминания</h3>
+
+<p>Добавьте в конец <code>texts.py</code>:</p>
+
+<pre><code class="language-python">REMINDER = "⏰ Пора: &lt;b&gt;{name}&lt;/b&gt;\nОтметьте, когда сделаете."</code></pre>
+
+<p>И в конец <code>keyboards.py</code>:</p>
+
+<pre><code class="language-python">def reminder_keyboard(habit_id: int, name: str) -&gt; InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"⬜ {name}", callback_data=f"toggle_{habit_id}_0")
+    return builder.as_markup()</code></pre>
+
+<p>Кнопка шлёт тот же <code>toggle_ID_СТРАНИЦА</code>, что кнопки экрана <code>/today</code> (урок 5.3). Новый хэндлер не нужен: нажатие обработает <code>toggle_habit_from_list</code>. Он отметит привычку и превратит сообщение-напоминание в экран <code>/today</code>, первую страницу.</p>
+
+<h3>Шаг 2. Модуль</h3>
+
+<p>Создайте в папке проекта <code>reminders.py</code>:</p>
+
+<pre><code class="language-python">"""Напоминания: бот сам пишет пользователям по расписанию."""
+import asyncio
+import logging
+from datetime import datetime, timedelta
+
+from aiogram import Bot, html
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.types import InlineKeyboardMarkup
+
+import clock
+import database
+import keyboards
+import texts
+from handlers.habits import build_morning_text
+
+MORNING_TIME = "07:30"
+CATCH_UP = timedelta(minutes=15)
+
+logger = logging.getLogger(__name__)
+
+
+def is_due(remind_time: str, now: datetime) -&gt; bool:
+    hours, minutes = remind_time.split(":")
+    planned = now.replace(
+        hour=int(hours), minute=int(minutes), second=0, microsecond=0
+    )
+    return planned &lt;= now &lt; planned + CATCH_UP
+
+
+async def deliver(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+) -&gt; None:
+    try:
+        await bot.send_message(user_id, text, reply_markup=markup)
+    except TelegramForbiddenError:
+        logger.warning("Пользователь %s заблокировал бота", user_id)
+
+
+async def send_due(bot: Bot, now: datetime) -&gt; None:
+    day = now.date()
+
+    if is_due(MORNING_TIME, now):
+        for user_id in await database.get_user_ids():
+            if await database.mark_sent(user_id, "morning", day):
+                text = await build_morning_text(user_id, day)
+                await deliver(bot, user_id, text)
+
+    for habit in await database.get_all_habits():
+        if not is_due(habit["remind_time"], now):
+            continue
+
+        user_id = habit["user_id"]
+        done_ids = await database.get_done_ids(user_id, day)
+        if habit["id"] in done_ids:
+            continue
+
+        if await database.mark_sent(user_id, f"habit_{habit['id']}", day):
+            await deliver(
+                bot,
+                user_id,
+                texts.REMINDER.format(name=html.quote(habit["name"])),
+                keyboards.reminder_keyboard(habit["id"], habit["name"]),
+            )
+
+
+async def reminder_loop(bot: Bot) -&gt; None:
+    while True:
+        await send_due(bot, clock.now())
+        await asyncio.sleep(60 - clock.now().second)</code></pre>
+
+<p>Разберём по функциям.</p>
+
+<h3>is_due()</h3>
+
+<p>Ваша функция из задачи 1, с аннотациями. <code>CATCH_UP</code> и <code>MORNING_TIME</code> &mdash; константы модуля, рядом.</p>
+
+<h3>deliver(): отправка без message</h3>
+
+<p>В хэндлерах мы писали <code>message.answer()</code>: у сообщения есть чат, туда и ответ. У рассылки сообщения нет, поэтому отправляет сам бот: <code>bot.send_message(user_id, text)</code>. В личной переписке номер чата равен номеру пользователя (урок 7.4), так что <code>user_id</code> из базы подходит.</p>
+
+<p>Почему отправка завернута в <code>try</code>? Пользователь может заблокировать бота. Тогда Telegram отвечает отказом, и aiogram поднимает <code>TelegramForbiddenError</code>. Мы проверили, что будет без <code>try</code>, если Аня заблокировала бота:</p>
+
+<pre><code>== проверка на 07:30
+Traceback (most recent call last):
+  ...
+  File "reminders.py", line 46, in send_due
+    await deliver(bot, user_id, text)
+  File "reminders.py", line 36, in deliver
+    await bot.send_message(user_id, text, reply_markup=markup)
+  ...
+aiogram.exceptions.TelegramForbiddenError: Telegram server says - Forbidden: bot was blocked by the user</code></pre>
+
+<p>Исключение вылетело из <code>send_due()</code>, и рассылка оборвалась на Ане. Борис стоит в списке после неё и не получил ничего. Один заблокировавший бота пользователь оставил без сообщений всех, кто идёт за ним. Поэтому ловим ровно этот отказ, пишем в лог и идём дальше &mdash; правило урока 2.6.</p>
+
+<p>С <code>try</code> в <code>deliver()</code> мы проверили обратный случай: бота заблокировал Борис. Аня получила своё сообщение, а в терминале бота осталась строка лога:</p>
+
+<pre><code>== проверка на 07:30
+  Бот → Аня: Доброе утро! Казань: +3, ясно.
+
+       Ваши привычки на сегодня:
+       ⬜ Растяжка
+       ⬜ Чтение
+
+       Отметить &mdash; на экране /today
+Пользователь 222 заблокировал бота</code></pre>
+
+<h3>send_due(): кому что отправить</h3>
+
+<p>Две части, по одной на вид сообщения.</p>
+
+<p><strong>Утреннее.</strong> Если <code>MORNING_TIME</code> попало в окно &mdash; для каждого пользователя с привычками: <code>mark_sent()</code> пропустил &mdash; собрать текст и отправить.</p>
+
+<p><strong>По привычкам.</strong> Для каждой привычки: не пора &mdash; дальше. Уже отмечена сегодня &mdash; дальше: напоминать о сделанном незачем. Иначе &mdash; <code>mark_sent()</code> и отправка с кнопкой. Название привычки проходит через <code>html.quote()</code>, как везде, где его пишет пользователь.</p>
+
+<p>Порядок проверок выбран не случайно: сначала самые дешёвые. <code>is_due()</code> &mdash; вычисление без базы, и большинство привычек отсеется на нём. Запрос отметок и запись в <code>sent</code> &mdash; только для тех, кому действительно пора.</p>
+
+<h3>reminder_loop(): цикл</h3>
+
+<p>Две строки из разделов 2&ndash;4: проверить на текущий момент и спать до следующей минуты. Первая проверка &mdash; сразу при запуске, поэтому пропущенное за время перезапуска догоняется без ожидания.</p>
+
+<blockquote><strong>💡 Забегая вперёд:</strong><br />
+<code>deliver()</code> ловит одну ожидаемую ошибку. Но если внутри <code>send_due()</code> случится неожиданная &mdash; например, база окажется заблокированной, &mdash; исключение вылетит из цикла, и задача молча завершится. Бот продолжит отвечать на команды, а напоминания прекратятся. Как это заметить и как это предотвратить, разберём в уроке 9.4.</blockquote>
+
+
+<!-- ═══ ШАГ 12 · text · новый шаг ═══ -->
+
+<h2>🚀 9. Запускаем вместе с ботом</h2>
+
+<p>Осталось запустить цикл. Откройте <code>bot.py</code>. Добавьте импорт:</p>
+
+<pre><code class="language-python">import database
+import reminders
+from config import TOKEN</code></pre>
+
+<p>И в <code>main()</code>, после подключения роутеров, перед <code>print()</code>:</p>
+
+<pre><code class="language-python">    reminder_task = asyncio.create_task(reminders.reminder_loop(bot))
+
+    print("ПривычкаБот запущен. Ctrl+C для остановки.")
+    await dp.start_polling(bot)</code></pre>
+
+<p>Цикл получает <code>bot</code> &mdash; тот же объект, через который работает опрос. Запускается он до <code>start_polling()</code>: эта строка не возвращает управление, всё после неё не выполнится, пока бот работает (урок 7.4).</p>
+
+<p>Запустите бота: </p>
+
+<pre><code>ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<p>Снаружи ничего не изменилось. А внутри рядом с опросом Telegram уже идёт проверка раз в минуту.</p>
+
+<h4>🔍 Проверка 1: утро без ожидания утра</h4>
+
+<p>Ради этого мы сделали <code>send_due()</code> с временем в аргументе. Создайте в папке проекта временный файл <code>remind_now.py</code>:</p>
+
+<pre><code class="language-python">"""Проверка напоминаний: один вызов send_due() с выбранным временем."""
+import asyncio
+
+from aiogram import Bot
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+import clock
+import reminders
+from config import TOKEN
+
+
+async def main() -&gt; None:
+    bot = Bot(
+        token=TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    now = clock.now().replace(hour=7, minute=30)
+    print("проверяю на", now.strftime("%H:%M"))
+    await reminders.send_due(bot, now)
+    await bot.session.close()
+
+
+asyncio.run(main())</code></pre>
+
+<p>Скрипт создаёт объект бота с вашим токеном, как <code>bot.py</code>, и один раз вызывает <code>send_due()</code> с временем 07:30 сегодняшнего дня. Опрос Telegram он не запускает, поэтому может работать рядом с запущенным ботом. Сообщения уйдут по-настоящему &mdash; тем, у кого есть привычки в вашей базе.</p>
+
+<p>У Ани &laquo;Растяжка&raquo; на 21:00 и &laquo;Чтение&raquo; на 08:00, город Казань. У Бориса &laquo;Бег&raquo; на 07:00 и города нет. Запустите <code>python remind_now.py</code> три раза подряд, а в третий раз &mdash; с 07:31 в строке <code>now</code>. Что пришло в Telegram:</p>
+
+<pre><code>== проверка на 07:30
+  Бот → Аня: Доброе утро! Казань: +3, ясно.
+
+       Ваши привычки на сегодня:
+       ⬜ Растяжка
+       ⬜ Чтение
+
+       Отметить &mdash; на экране /today
+  Бот → Борис: Доброе утро! Город для погоды не задан: /city Казань
+
+       Ваши привычки на сегодня:
+       ⬜ Бег
+
+       Отметить &mdash; на экране /today
+== проверка на 07:30
+  (бот никому не написал)
+== проверка на 07:31
+  (бот никому не написал)</code></pre>
+<!-- АВТОР: проверено на стенде &mdash; send_due() проекта с подменённой отправкой в Telegram; три вызова подряд в одной базе -->
+
+<p>Первый вызов разослал утренние сообщения: у Ани с погодой, у Бориса с подсказкой про <code>/city</code>. Второй и третий не отправили ничего: <code>mark_sent()</code> вернул <code>False</code>. &laquo;Бег&raquo; на 07:00 тоже не пришёл: тридцать минут &mdash; за пределами окна.</p>
+
+<p>Теперь поменяйте время на вечер:</p>
+
+<pre><code class="language-python">    now = clock.now().replace(hour=21, minute=0)</code></pre>
+
+<pre><code>== проверка на 21:00
+  Бот → Аня: ⏰ Пора: Растяжка
+       Отметьте, когда сделаете.
+
+       [ ⬜ Растяжка ]</code></pre>
+
+<p>Напоминание о &laquo;Растяжке&raquo; с кнопкой. Аня нажимает её:</p>
+
+<pre><code>  Аня: [нажимает &laquo;⬜ Растяжка&raquo;]
+  Бот (правит сообщение): Мои привычки на сегодня
+       текущая дата
+
+       Выполнено: 1 из 2
+
+       [ ✅ Растяжка ]
+       [ ⬜ Чтение ]
+  Бот: (плашка: Отмечено!)
+       [состояние: None]</code></pre>
+
+<p>Привычка отмечена, а напоминание превратилось в экран <code>/today</code>.</p>
+
+<h4>🔍 Проверка 2: сделанное не напоминается</h4>
+
+<p>Мы проверили на свежей базе: Аня отметила &laquo;Чтение&raquo; на <code>/today</code> до 08:00, а потом сработала проверка 08:00:</p>
+
+<pre><code>== проверка на 08:00
+  (бот никому не написал)</code></pre>
+
+<h4>🔍 Проверка 3: поздний запуск</h4>
+
+<p>Бота запустили в 07:40, а затем в 22:00:</p>
+
+<pre><code>== проверка на 07:40
+  Бот → Аня: Доброе утро! Казань: +3, ясно.
+
+       Ваши привычки на сегодня:
+       ⬜ Растяжка
+       ⬜ Чтение
+
+       Отметить &mdash; на экране /today
+  Бот → Борис: Доброе утро! Город для погоды не задан: /city Казань
+
+       Ваши привычки на сегодня:
+       ⬜ Бег
+
+       Отметить &mdash; на экране /today
+== проверка на 22:00
+  (бот никому не написал)</code></pre>
+
+<p>В 07:40 утреннее сообщение догнало &mdash; окно ещё открыто. В 22:00 бот не прислал ничего: напоминания на 08:00 и 21:00 уже вне окна.</p>
+
+<h4>🔍 Проверка 4: настоящий цикл</h4>
+
+<p>Последняя проверка &mdash; без <code>remind_now.py</code>. Запустите бота, создайте через <code>/add</code> привычку с временем на две минуты вперёд и ждите, не трогая Telegram. Мы проверили на стенде: поставили &laquo;Бегу&raquo; Бориса текущую минуту и запустили <code>reminder_loop()</code>:</p>
+
+<pre><code>через 1.5 с после запуска:
+  Бот → Борис: ⏰ Пора: Бег
+       Отметьте, когда сделаете.
+
+       [ ⬜ Бег ]</code></pre>
+
+<p>Напоминание пришло само: никто ничего не отправлял, бот написал первым.</p>
+
+<p>Когда проверки пройдены, <strong>удалите <code>remind_now.py</code></strong>: в проекте он не нужен.</p>
+
+<h3>Чек-лист</h3>
+
+<ul>
+	<li>Бот запускается, команды отвечают как раньше</li>
+	<li>В 07:30 приходит утреннее сообщение с погодой, у кого задан город, &mdash; и с подсказкой <code>/city</code>, у кого нет</li>
+	<li>В <code>remind_time</code> приходит напоминание с кнопкой; кнопка отмечает привычку</li>
+	<li>Отмеченная привычка не напоминается</li>
+	<li>Повторные проверки и перезапуск не дают второго сообщения</li>
+	<li>Запуск поздно вечером не присылает утренние напоминания</li>
+	<li>В <code>handlers/habits.py</code> не осталось <code>date.today()</code></li>
+	<li><code>tzdata</code> записан в <code>requirements.txt</code></li>
+</ul>
+
+
+<!-- ═══ ШАГ 13 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему <code>send_due()</code> получает время аргументом <code>now</code>, а не вызывает <code>clock.now()</code> внутри себя?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Так её можно вызвать для любого момента, например 07:30, и проверить, не дожидаясь утра ✅</li>
+	<li>Внутри функции <code>clock.now()</code> вернул бы время по UTC</li>
+	<li>Так быстрее: время узнаётся один раз в сутки</li>
+	<li><code>clock.now()</code> нельзя вызывать внутри асинхронной функции</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. На этом построен <code>remind_now.py</code>: тот же код, что работает в цикле, вызывается с выбранным временем.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните раздел 4 и проверку 1 в разделе 9. Как <code>remind_now.py</code> узнал, что &laquo;сейчас 07:30&raquo;, если на часах было другое время?</p>
+
+
+<!-- ═══ ШАГ 14 · text · новый шаг ═══ -->
+
+<h2>🔧 10. Если что-то не сошлось</h2>
+
+<p>Каждый симптом мы получили на стенде, сломав готовый проект в одном месте.</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Симптом</th>
+			<th>Где искать</th>
+		</tr>
+		<tr>
+			<td>После <code>python bot.py</code> нет строки &laquo;ПривычкаБот запущен&raquo;, бот не отвечает ни на одну команду</td>
+			<td>В <code>main()</code> написано <code>await reminders.reminder_loop(bot)</code> вместо <code>create_task()</code></td>
+		</tr>
+		<tr>
+			<td>Утреннее сообщение приходит каждую минуту, в терминале <code>coroutine 'mark_sent' was never awaited</code></td>
+			<td>Перед <code>database.mark_sent()</code> пропущен <code>await</code>: корутина в <code>if</code> всегда истинна</td>
+		</tr>
+		<tr>
+			<td><code>sqlite3.OperationalError: no such table: sent</code></td>
+			<td>Таблицы нет в <code>CREATE_TABLES</code>, или бот не перезапущен после изменения</td>
+		</tr>
+		<tr>
+			<td>Рассылка обрывается, в терминале <code>TelegramForbiddenError: ... bot was blocked by the user</code></td>
+			<td>В <code>deliver()</code> нет <code>try</code> вокруг <code>send_message()</code></td>
+		</tr>
+		<tr>
+			<td><code>ZoneInfoNotFoundError: 'No time zone found with key Europe/Moscow'</code></td>
+			<td>Windows без пакета <code>tzdata</code>: <code>python -m pip install tzdata</code></td>
+		</tr>
+		<tr>
+			<td>Напоминания приходят на три часа позже</td>
+			<td>Где-то в рассылке осталось <code>datetime.now()</code> вместо <code>clock.now()</code></td>
+		</tr>
+		<tr>
+			<td>После 21:00 отметка на <code>/today</code> уходит во вчерашний день (на сервере)</td>
+			<td>В <code>handlers/habits.py</code> осталось <code>date.today()</code></td>
+		</tr>
+		<tr>
+			<td>Напоминание о привычке не приходит, хотя время наступило</td>
+			<td>Привычка уже отмечена сегодня, или с её времени прошло больше 15 минут</td>
+		</tr>
+		<tr>
+			<td>Ни одного сообщения, ни одной ошибки, команды работают</td>
+			<td>Цикл не запущен: нет строки с <code>create_task()</code> в <code>main()</code> или нет <code>import reminders</code></td>
+		</tr>
+	</tbody>
+</table>
+
+
+<!-- ═══ ШАГ 15 · text · новый шаг ═══ -->
+
+<h2>📋 Итог урока 9.1</h2>
+
+<p>До урока ПривычкаБот только отвечал. Теперь он пишет сам: утреннее сообщение в 07:30 и напоминания о привычках в их время. И делает это, не мешая отвечать на команды.</p>
+
+<ul>
+	<li>✅ Хэндлер вызывается только на обновление; работа по времени &mdash; отдельная корутина</li>
+	<li>✅ Бесконечный цикл с <code>await asyncio.sleep()</code>, запущенный через <code>create_task()</code>, работает рядом с опросом Telegram</li>
+	<li>✅ <code>await</code> бесконечного цикла не даст боту начать опрос; результат <code>create_task()</code> сохраняем</li>
+	<li>✅ Проверка раз в минуту, сон до начала следующей: <code>60 - now.second</code></li>
+	<li>✅ <code>send_due(bot, now)</code> получает время аргументом &mdash; её можно проверить для любого часа</li>
+	<li>✅ &laquo;Пора&raquo; &mdash; окно в 15 минут: перезапуск не теряет напоминания и не присылает старые</li>
+	<li>✅ Таблица <code>sent</code> с <code>UNIQUE</code> и <code>ON CONFLICT DO NOTHING</code> &mdash; одно сообщение одного вида в день</li>
+	<li>✅ <code>clock.now()</code> и <code>clock.today()</code> &mdash; время бота не зависит от времени сервера</li>
+	<li>✅ <code>bot.send_message()</code> пишет без входящего сообщения; <code>TelegramForbiddenError</code> не обрывает рассылку</li>
+</ul>
+
+<h3>📝 Шпаргалка</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Запись</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td><code>task = asyncio.create_task(loop(bot))</code></td>
+			<td>Запустить фоновую корутину и сохранить ссылку</td>
+		</tr>
+		<tr>
+			<td><code>await asyncio.sleep(60 - now.second)</code></td>
+			<td>Спать до начала следующей минуты</td>
+		</tr>
+		<tr>
+			<td><code>now.replace(hour=7, minute=30, second=0, microsecond=0)</code></td>
+			<td>Сегодня в 07:30</td>
+		</tr>
+		<tr>
+			<td><code>planned &lt;= now &lt; planned + CATCH_UP</code></td>
+			<td>Время наступило недавно</td>
+		</tr>
+		<tr>
+			<td><code>INSERT ... ON CONFLICT DO NOTHING</code> + <code>rowcount</code></td>
+			<td>Записать, если ещё нет, и узнать, записалось ли</td>
+		</tr>
+		<tr>
+			<td><code>datetime.now(ZoneInfo("Europe/Moscow"))</code></td>
+			<td>Текущее время в нужном поясе</td>
+		</tr>
+		<tr>
+			<td><code>await bot.send_message(user_id, text)</code></td>
+			<td>Написать пользователю первым</td>
+		</tr>
+		<tr>
+			<td><code>except TelegramForbiddenError:</code></td>
+			<td>Пользователь заблокировал бота</td>
+		</tr>
+	</tbody>
+</table>
+
+<h3>Что изменилось в проекте</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Файл</th>
+			<th>Изменения</th>
+		</tr>
+		<tr>
+			<td><code>clock.py</code></td>
+			<td><strong>новый</strong>: <code>TIMEZONE</code>, <code>now()</code>, <code>today()</code></td>
+		</tr>
+		<tr>
+			<td><code>reminders.py</code></td>
+			<td><strong>новый</strong>: <code>MORNING_TIME</code>, <code>CATCH_UP</code>, <code>is_due()</code>, <code>deliver()</code>, <code>send_due()</code>, <code>reminder_loop()</code></td>
+		</tr>
+		<tr>
+			<td><code>database.py</code></td>
+			<td>таблица <code>sent</code>; добавлены <code>mark_sent()</code>, <code>get_all_habits()</code>, <code>get_user_ids()</code></td>
+		</tr>
+		<tr>
+			<td><code>handlers/habits.py</code></td>
+			<td><code>import clock</code>; <code>date.today()</code> &rarr; <code>clock.today()</code> в шести хэндлерах</td>
+		</tr>
+		<tr>
+			<td><code>keyboards.py</code></td>
+			<td>добавлена <code>reminder_keyboard()</code></td>
+		</tr>
+		<tr>
+			<td><code>texts.py</code></td>
+			<td>добавлен <code>REMINDER</code></td>
+		</tr>
+		<tr>
+			<td><code>bot.py</code></td>
+			<td><code>import reminders</code>; запуск <code>reminder_loop()</code> через <code>create_task()</code></td>
+		</tr>
+		<tr>
+			<td><code>requirements.txt</code></td>
+			<td>добавлен <code>tzdata</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<details><summary>📄 reminders.py целиком</summary>
+
+<pre><code class="language-python">"""Напоминания: бот сам пишет пользователям по расписанию."""
+import asyncio
+import logging
+from datetime import datetime, timedelta
+
+from aiogram import Bot, html
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.types import InlineKeyboardMarkup
+
+import clock
+import database
+import keyboards
+import texts
+from handlers.habits import build_morning_text
+
+MORNING_TIME = "07:30"
+CATCH_UP = timedelta(minutes=15)
+
+logger = logging.getLogger(__name__)
+
+
+def is_due(remind_time: str, now: datetime) -&gt; bool:
+    hours, minutes = remind_time.split(":")
+    planned = now.replace(
+        hour=int(hours), minute=int(minutes), second=0, microsecond=0
+    )
+    return planned &lt;= now &lt; planned + CATCH_UP
+
+
+async def deliver(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+) -&gt; None:
+    try:
+        await bot.send_message(user_id, text, reply_markup=markup)
+    except TelegramForbiddenError:
+        logger.warning("Пользователь %s заблокировал бота", user_id)
+
+
+async def send_due(bot: Bot, now: datetime) -&gt; None:
+    day = now.date()
+
+    if is_due(MORNING_TIME, now):
+        for user_id in await database.get_user_ids():
+            if await database.mark_sent(user_id, "morning", day):
+                text = await build_morning_text(user_id, day)
+                await deliver(bot, user_id, text)
+
+    for habit in await database.get_all_habits():
+        if not is_due(habit["remind_time"], now):
+            continue
+
+        user_id = habit["user_id"]
+        done_ids = await database.get_done_ids(user_id, day)
+        if habit["id"] in done_ids:
+            continue
+
+        if await database.mark_sent(user_id, f"habit_{habit['id']}", day):
+            await deliver(
+                bot,
+                user_id,
+                texts.REMINDER.format(name=html.quote(habit["name"])),
+                keyboards.reminder_keyboard(habit["id"], habit["name"]),
+            )
+
+
+async def reminder_loop(bot: Bot) -&gt; None:
+    while True:
+        await send_due(bot, clock.now())
+        await asyncio.sleep(60 - clock.now().second)</code></pre>
+</details>
+
+<details><summary>📄 bot.py целиком</summary>
+
+<pre><code class="language-python">import asyncio
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import SimpleEventIsolation
+
+import database
+import reminders
+from config import TOKEN
+from handlers import add, common, fallback, guard, habits
+
+async def main() -&gt; None:
+    await database.init_db()
+
+    bot = Bot(
+        token=TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher(events_isolation=SimpleEventIsolation())
+
+    dp.include_router(guard.router)
+    dp.include_router(common.router)
+    dp.include_router(habits.router)
+    dp.include_router(add.router)
+    dp.include_router(fallback.router)
+
+    reminder_task = asyncio.create_task(reminders.reminder_loop(bot))
+
+    print("ПривычкаБот запущен. Ctrl+C для остановки.")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("ПривычкаБот остановлен.")</code></pre>
+</details>
+
+<blockquote><strong>⚠️ Что пока остаётся учебным:</strong><br />
+Напоминания работают, только пока бот запущен. Закроете ноутбук &mdash; в 07:30 сообщение не придёт, а утром окно в 15 минут уже закроется. Частота привычки по-прежнему ни на что не влияет: напоминание приходит каждый день.</blockquote>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>Код готов: бот умеет писать сам. Но в 07:30 ноутбук спит, и бот вместе с ним. Последний шаг, ради которого всё затевалось, &mdash; запустить бота там, где он не спит никогда.</p>
+
+<p>В уроке 9.2 арендуем сервер, подключимся к нему по SSH, перенесём проект и запустим бота там. И увидим своими глазами, зачем в этом уроке понадобился <code>clock.py</code>: часы сервера покажут не московское время.</p>

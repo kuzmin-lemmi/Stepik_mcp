@@ -1,0 +1,763 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 9.4. Бот, который не падает: обработчик ошибок и логи</h2>
+
+<p><strong>Аннотация:</strong><br />
+После урока 9.3 ПривычкаБот &mdash; служба сервера: systemd поднимет его после сбоя и после перезагрузки. Но systemd видит бота только снаружи: жив процесс или нет. А бот может быть жив и при этом сломан изнутри.</p>
+
+<p>Сегодня устроим боту аварию и увидим две такие поломки. Хэндлер падает &mdash; пользователь остаётся без ответа. Цикл напоминаний падает &mdash; и умирает молча, хотя бот продолжает отвечать на команды. Починим обе и настроим журнал так, чтобы по нему было видно, что случилось, когда и с кем.</p>
+
+<blockquote><strong>🛠 Как устроен урок:</strong><br />
+Опыты &mdash; на вашем компьютере, с ботом, запущенным из терминала. Меняем ПривычкаБот: новый файл <code>handlers/errors.py</code>, правки в <code>bot.py</code>, <code>reminders.py</code> и <code>texts.py</code>. В разделе 7 обновлённый бот переедет на сервер способом из урока 9.3.</blockquote>
+
+<blockquote><strong>🎯 Цель урока:</strong><br />
+&bull; Устроить аварию и увидеть, что получает пользователь, &mdash; <strong>раздел 1</strong><br />
+&bull; Найти задачу, которая умерла молча, &mdash; <strong>раздел 2</strong><br />
+&bull; Настроить журнал: время, уровень, источник &mdash; <strong>раздел 3</strong><br />
+&bull; Написать обработчик ошибок aiogram &mdash; <strong>разделы 4&ndash;5</strong><br />
+&bull; Застраховать цикл напоминаний &mdash; <strong>раздел 6</strong><br />
+&bull; Искать ошибки в журнале на сервере &mdash; <strong>раздел 7</strong></blockquote>
+
+<h2>💥 1. Авария: база занята</h2>
+
+<p>Нужна поломка, которая не зависит от нашего кода и может случиться на любом сервере. Вот такая: базу <code>habits.db</code> открыла другая программа и держит её. Например, вы зашли на сервер, открыли базу, чтобы посмотреть или поправить данные, и начали изменение, но не закончили его. Пока изменение не закончено, SQLite не пускает в базу других. <code>aiosqlite</code> подождёт 5 секунд и сдастся с ошибкой <code>database is locked</code>.</p>
+
+<p>Изобразим такую программу. Создайте в папке <code>bg_lab</code> из урока 9.1 файл <code>lock.py</code>:</p>
+
+<pre><code class="language-python">"""Держит habits.db заблокированной на запись N секунд &mdash; как открытая в другой программе база."""
+import sqlite3, sys, time
+db = sqlite3.connect(sys.argv[1], isolation_level=None)
+db.execute("BEGIN EXCLUSIVE")
+time.sleep(float(sys.argv[2]))
+db.execute("ROLLBACK")</code></pre>
+
+<p>Программа открывает базу, начинает изменение командой <code>BEGIN EXCLUSIVE</code> &mdash; &laquo;никого не пускать&raquo;, держит её указанное число секунд и отменяет изменение. Данные она не меняет.</p>
+
+<h3>Опыт</h3>
+
+<p>Запустите бота из терминала, как раньше: <code>python bot.py</code>. Во втором терминале, в папке проекта, займите базу на 9 секунд:</p>
+
+<pre><code>python ../bg_lab/lock.py habits.db 9</code></pre>
+
+<p>Пока она занята, отправьте боту <code>/today</code>. Мы провели этот опыт на стенде:</p>
+
+<pre><code>  Аня: /today
+  Бот: (не отвечает)</code></pre>
+
+<p>Аня не получила ничего. Ни ответа, ни сообщения об ошибке &mdash; бот промолчал. Для неё это выглядит так, будто бот сломался или не услышал. А в терминале бота:</p>
+
+<pre><code>Cause exception while process update id=11 by bot id=123456789
+OperationalError: database is locked
+Traceback (most recent call last):
+  ...
+  File "handlers/habits.py", line 61, in cmd_today
+    text, markup = await build_today_screen(
+  File "handlers/habits.py", line 24, in build_today_screen
+    habits = await database.get_habits(user_id)
+  File "database.py", line 68, in get_habits
+    cursor = await db.execute(
+  ...
+sqlite3.OperationalError: database is locked</code></pre>
+
+<p>Это пишет aiogram: <code>Cause exception while process update</code> &mdash; &laquo;исключение при обработке обновления&raquo;. Ниже &mdash; traceback: ошибка вылетела из <code>get_habits()</code> внутри <code>cmd_today</code>. Без времени: когда это случилось, мы не знаем. Без пользователя: у кого не сработал <code>/today</code>, тоже не знаем. На сервере эти строки лягут в журнал, и через неделю из них не понять, что произошло.</p>
+
+<p>Через 9 секунд база освободилась. Аня повторяет <code>/today</code> &mdash; и всё работает. Авария прошла. Или не вся?</p>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>🕳 2. Задача, которая умерла молча</h2>
+
+<p>В опыте мы занимали базу на стыке минут: с 19:56:57 до 19:57:06. Ровно в 19:57:00 проснулся цикл напоминаний из урока 9.1 и вызвал <code>send_due()</code>. Та пошла в базу за привычками &mdash; и тоже получила <code>database is locked</code>.</p>
+
+<p>У Бориса привычка &laquo;Бег&raquo; с напоминанием на 19:58. Мы подождали до 19:58:10. Напоминание не пришло. В терминале бота &mdash; ни одной новой строки. Бот при этом отвечал на <code>/today</code> как ни в чём не бывало.</p>
+
+<p>Что случилось, мы узнали только тогда, когда остановили бота <code>Ctrl+C</code>. В самом конце вывода:</p>
+
+<pre><code>Task exception was never retrieved
+future: &lt;Task finished name='Task-2' coro=&lt;reminder_loop() done, defined at .../habit_bot/reminders.py:69&gt; exception=OperationalError('database is locked')&gt;
+Traceback (most recent call last):
+  File "reminders.py", line 71, in reminder_loop
+    await send_due(bot, clock.now())
+  File "reminders.py", line 51, in send_due
+    for habit in await database.get_all_habits():
+  File "database.py", line 217, in get_all_habits
+    cursor = await db.execute(
+  ...
+sqlite3.OperationalError: database is locked</code></pre>
+
+<p><code>Task exception was never retrieved</code> &mdash; &laquo;исключение задачи так никто и не забрал&raquo;. Задача <code>reminder_loop()</code> завершилась ещё в 19:57: исключение вылетело из <code>send_due()</code>, прошло через <code>while True</code>, и цикл закончился. Задача умерла.</p>
+
+<h3>Почему никто не заметил</h3>
+
+<p>Вспомните модуль 3: исключение внутри задачи хранится в самой задаче, пока кто-нибудь не дождётся её через <code>await</code>. Тогда оно вылетит в том месте. Но цикл напоминаний мы запустили через <code>create_task()</code> именно для того, чтобы его <strong>не</strong> ждать. Исключение легло в задачу и лежало там, пока программа не завершилась. Только тогда <code>asyncio</code> сообщил: была ошибка, и её никто не посмотрел.</p>
+
+<p>И systemd из урока 9.3 здесь не поможет. Процесс жив, Telegram опрашивается, на команды бот отвечает. Перезапускать нечего. Напоминания перестали приходить &mdash; навсегда, до следующего перезапуска бота. Это самая опасная поломка модуля: бот выглядит здоровым.</p>
+
+<blockquote><strong>🔑 Ошибка в фоновой задаче убивает задачу, а не бота:</strong><br />
+Исключение, вылетевшее из корутины, запущенной через <code>create_task()</code>, тихо завершает её. Бот продолжает работать, а об ошибке видно только при остановке программы.</blockquote>
+
+
+<!-- ═══ ШАГ 3 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему смерть цикла напоминаний не видна ни в терминале, ни в <code>systemctl status</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Исключение остаётся внутри задачи, которую никто не ждёт через <code>await</code>, а процесс бота продолжает работать ✅</li>
+	<li>aiogram перехватывает все исключения и скрывает их</li>
+	<li>systemd перезапускает задачу, и ошибка теряется</li>
+	<li><code>database is locked</code> &mdash; не исключение, а предупреждение</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. <code>asyncio</code> сообщает об ошибке такой задачи только при её уничтожении, обычно &mdash; при остановке программы. А systemd следит за процессом, не за задачами внутри него.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Когда в опыте появилось сообщение <code>Task exception was never retrieved</code>? И что видит systemd: процесс или отдельные корутины внутри него?</p>
+
+
+<!-- ═══ ШАГ 4 · text · новый шаг ═══ -->
+
+<h2>📒 3. Журнал со временем и уровнями</h2>
+
+<p>Прежде чем чинить, научимся видеть. В уроке 1.2 мы знакомились с модулем <code>logging</code>: уровни, <code>basicConfig()</code>, логгер на каждый модуль. Логгеры в ПривычкаБоте уже есть &mdash; <code>logging.getLogger(__name__)</code> в <code>weather.py</code> и <code>reminders.py</code>. Но журнал никто не настроил, и Python печатает только предупреждения и ошибки, без времени и уровня (урок 8.4).</p>
+
+<p>Настроим. В <code>bot.py</code> добавьте импорт:</p>
+
+<pre><code class="language-python">import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher</code></pre>
+
+<p>И строку формата перед <code>main()</code>, а настройку &mdash; первой строкой внутри:</p>
+
+<pre><code class="language-python">LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+async def main() -&gt; None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    await database.init_db()</code></pre>
+
+<p>Формат читается так:</p>
+
+<pre><code>%(asctime)s      &rarr;  дата и время с миллисекундами
+%(levelname)s    &rarr;  уровень: INFO, WARNING, ERROR
+%(name)s         &rarr;  чей логгер: имя модуля, где создан getLogger(__name__)
+%(message)s      &rarr;  сам текст</code></pre>
+
+<p><code>level=logging.INFO</code> &mdash; печатать всё от <code>INFO</code> и серьёзнее. Почему настройка внутри <code>main()</code>, а не в начале файла? Так она выполняется только при запуске бота. Если <code>bot.py</code> кто-то импортирует, например проверочный скрипт, его журнал наша настройка не тронет.</p>
+
+<p>Запустите бота и отправьте <code>/today</code>:</p>
+
+<pre><code>ПривычкаБот запущен. Ctrl+C для остановки.
+2026-11-01 16:58:37,801 INFO aiogram.dispatcher: Start polling
+2026-11-01 16:58:37,805 INFO aiogram.dispatcher: Run polling for bot @habit_demo_bot id=123456789 - 'ПривычкаБот'
+2026-11-01 16:58:38,425 INFO aiogram.event: Update id=13 is handled. Duration 11 ms by bot id=123456789</code></pre>
+<!-- АВТОР: на стенде бот запущен с часовым поясом сервера (UTC), поэтому время в журнале на три часа отстаёт от московского; дома будет местное время -->
+
+<p>Заговорил aiogram. Эти строки он писал и раньше, но без настройки уровень <code>INFO</code> не печатался. <code>Start polling</code> &mdash; опрос начался. <code>Update id=13 is handled. Duration 11 ms</code> &mdash; обновление обработано за 11 миллисекунд: по такой строке на каждое сообщение и нажатие. Имя после уровня показывает, кто пишет: <code>aiogram.dispatcher</code>, <code>aiogram.event</code>. Записи наших модулей будут подписаны <code>weather</code>, <code>reminders</code>.</p>
+
+<p>Время в журнале &mdash; время компьютера, на котором работает бот. На сервере это UTC. <code>clock.py</code> из урока 9.1 отвечает за расписание бота, а журналу нужно время машины: по нему его сверяют с журналами системы.</p>
+
+<h3>Какой уровень для чего</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Уровень</th>
+			<th>Когда</th>
+			<th>Пример в ПривычкаБоте</th>
+		</tr>
+		<tr>
+			<td><code>DEBUG</code></td>
+			<td>подробности для отладки, обычно выключены</td>
+			<td>&mdash;</td>
+		</tr>
+		<tr>
+			<td><code>INFO</code></td>
+			<td>обычное событие, всё идёт как надо</td>
+			<td>&laquo;Город не найден&raquo; в <code>weather.py</code>, запуск опроса</td>
+		</tr>
+		<tr>
+			<td><code>WARNING</code></td>
+			<td>что-то не так, но бот справился</td>
+			<td>&laquo;Погода недоступна&raquo;, &laquo;Пользователь заблокировал бота&raquo;</td>
+		</tr>
+		<tr>
+			<td><code>ERROR</code></td>
+			<td>операция не удалась</td>
+			<td>хэндлер упал, цикл напоминаний упал</td>
+		</tr>
+	</tbody>
+</table>
+
+<p>Вопрос, который задают себе каждый раз: нужно ли человеку что-то сделать? Город не нашёлся &mdash; нет, бот уже ответил. Сервис погоды не ответил &mdash; пока нет, но если такое каждый день, стоит разобраться. Упал хэндлер &mdash; да.</p>
+
+
+<!-- ═══ ШАГ 5 · matching · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Сопоставьте событие в ПривычкаБоте и уровень записи в журнал.</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: сопоставление) ↓ -->
+
+<ol>
+	<li>Пользователь написал <code>/city Привычкоград</code>, геокодер ничего не нашёл &rarr; <code>INFO</code></li>
+	<li>Open-Meteo не ответил за 5 секунд, вместо погоды &mdash; заглушка &rarr; <code>WARNING</code></li>
+	<li>Хэндлер <code>/today</code> упал с <code>database is locked</code> &rarr; <code>ERROR</code></li>
+	<li>Подробности каждого SQL-запроса, нужные только при отладке &rarr; <code>DEBUG</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Ненайденный город &mdash; обычный исход: бот ответил, делать ничего не нужно. Отказ сервиса бот пережил, но частые отказы стоят внимания. Упавший хэндлер &mdash; то, что нужно чинить.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Для каждого события спросите: справился ли бот сам? Нужно ли человеку что-то делать? Посмотрите таблицу уровней в разделе 3.</p>
+
+
+<!-- ═══ ШАГ 6 · text · новый шаг ═══ -->
+
+<h2>🛟 4. Обработчик ошибок</h2>
+
+<p>Теперь первая поломка: хэндлер упал, и пользователь не получил ответа. Чинить каждый хэндлер по отдельности &mdash; обернуть все обращения к базе в <code>try</code> &mdash; долго, и какой-нибудь всё равно забудется. Нужно одно место, куда попадают ошибки из всех хэндлеров.</p>
+
+<p>Такое место в aiogram есть. Когда хэндлер падает, aiogram не сразу пишет <code>Cause exception</code>, а сначала ищет <strong>обработчик ошибок</strong> &mdash; функцию, зарегистрированную через <code>@router.errors()</code>. Нашёл &mdash; передаёт ошибку ему. Не нашёл &mdash; пишет то, что мы видели в разделе 1.</p>
+
+<h3>Шаг 1. Текст для пользователя</h3>
+
+<p>Добавьте в конец <code>texts.py</code>:</p>
+
+<pre><code class="language-python">ERROR = "Что-то пошло не так. Попробуйте ещё раз через минуту."</code></pre>
+
+<p>Текст честный: что-то сломалось не по вине пользователя, и стоит попробовать позже. Подробностей вроде <code>database is locked</code> пользователю не нужно: ему они ничего не скажут.</p>
+
+<h3>Шаг 2. Роутер ошибок</h3>
+
+<p>Создайте файл <code>handlers/errors.py</code>:</p>
+
+<pre><code class="language-python">"""Ошибка в любом хэндлере: ответ пользователю и подробная запись в журнал."""
+import logging
+
+from aiogram import Router
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import ErrorEvent
+
+import texts
+
+router = Router(name="errors")
+logger = logging.getLogger(__name__)
+
+@router.errors()
+async def on_error(event: ErrorEvent) -&gt; None:
+    update = event.update
+    if update.message is not None:
+        user_id = update.message.from_user.id
+        what = update.message.text
+    elif update.callback_query is not None:
+        user_id = update.callback_query.from_user.id
+        what = update.callback_query.data
+    else:
+        user_id = None
+        what = None
+
+    logger.error(
+        "Ошибка в хэндлере: пользователь %s, событие %r",
+        user_id,
+        what,
+        exc_info=event.exception,
+    )
+
+    try:
+        if update.message is not None:
+            await update.message.answer(texts.ERROR)
+        elif update.callback_query is not None:
+            await update.callback_query.answer(texts.ERROR, show_alert=True)
+    except TelegramAPIError:
+        logger.warning("Не удалось сообщить пользователю %s об ошибке", user_id)</code></pre>
+
+<p>Разберём по частям.</p>
+
+<h3>ErrorEvent</h3>
+
+<p>Обработчик получает не сообщение, а событие ошибки <code>ErrorEvent</code>. В нём две вещи: <code>event.exception</code> &mdash; само исключение, и <code>event.update</code> &mdash; обновление от Telegram, на котором хэндлер упал. В обновлении есть либо сообщение (<code>update.message</code>), либо нажатие (<code>update.callback_query</code>), &mdash; второе будет <code>None</code>.</p>
+
+<h3>Запись в журнал</h3>
+
+<p>Первым делом &mdash; записать, что случилось. Номер пользователя и что он прислал: текст сообщения или <code>callback_data</code> кнопки. Этого не хватало в разделе 1. <code>%r</code> печатает значение в кавычках, как <code>!r</code> в f-строке (урок 8.3): видно, что <code>'/today'</code> &mdash; строка. Не f-строка, а <code>%s</code> и аргументы &mdash; как в <code>weather.py</code>: так принято в <code>logging</code>.</p>
+
+<p><code>exc_info=event.exception</code> добавляет к записи traceback этого исключения. Без него в журнале будет только наша строка, а где именно упало &mdash; не узнать.</p>
+
+<h3>Ответ пользователю</h3>
+
+<p>Потом &mdash; ответить. На сообщение отвечаем сообщением. На нажатие &mdash; окном <code>show_alert</code>: под кнопкой нельзя прислать сообщение-ответ, а окно пользователь увидит точно.</p>
+
+<p>Почему ответ завернут в <code>try</code>? Ошибка в хэндлере могла случиться потому, что не работает сам Telegram. Тогда и ответ не уйдёт, и обработчик упадёт внутри себя. Ловим <code>TelegramAPIError</code> &mdash; общего предка ошибок Telegram в aiogram, как <code>aiohttp.ClientError</code> в уроке 8.3, &mdash; и записываем, что сообщить не удалось.</p>
+
+<h3>Шаг 3. Подключить</h3>
+
+<p>В <code>bot.py</code> добавьте <code>errors</code> в импорт роутеров:</p>
+
+<pre><code class="language-python">from handlers import add, common, errors, fallback, guard, habits</code></pre>
+
+<p>И подключите его первым:</p>
+
+<pre><code class="language-python">    dp.include_router(errors.router)
+    dp.include_router(guard.router)</code></pre>
+
+<p>Порядок <code>guard</code> &rarr; <code>common</code> &rarr; <code>habits</code> &rarr; <code>add</code> &rarr; <code>fallback</code> из модуля 6 не меняется. В роутере <code>errors</code> нет ни одного хэндлера сообщений, поэтому он никого не перехватит, а ошибки получает от всех.</p>
+
+
+<!-- ═══ ШАГ 7 · text · новый шаг ═══ -->
+
+<h2>🔍 5. Повторяем аварию</h2>
+
+<p>Перезапустите бота, займите базу тем же <code>lock.py</code> и отправьте <code>/today</code>:</p>
+
+<pre><code>  Аня: /today
+  Бот: Что-то пошло не так. Попробуйте ещё раз через минуту.</code></pre>
+
+<p>Через пять секунд &mdash; столько <code>aiosqlite</code> ждал базу &mdash; Аня получила ответ. Не тот, на который рассчитывала, но честный. В терминале:</p>
+
+<pre><code>2026-11-01 16:59:02,720 ERROR handlers.errors: Ошибка в хэндлере: пользователь 111, событие '/today'
+Traceback (most recent call last):
+  ...
+  File "handlers/habits.py", line 61, in cmd_today
+    text, markup = await build_today_screen(
+  File "handlers/habits.py", line 24, in build_today_screen
+    habits = await database.get_habits(user_id)
+  File "database.py", line 68, in get_habits
+    cursor = await db.execute(
+  ...
+sqlite3.OperationalError: database is locked
+2026-11-01 16:59:02,724 INFO aiogram.event: Update id=14 is handled. Duration 5022 ms by bot id=123456789</code></pre>
+
+<p>Сравните с разделом 1:</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th></th>
+			<th>До</th>
+			<th>После</th>
+		</tr>
+		<tr>
+			<td>Пользователь</td>
+			<td>тишина</td>
+			<td>&laquo;Что-то пошло не так. Попробуйте ещё раз через минуту.&raquo;</td>
+		</tr>
+		<tr>
+			<td>Когда</td>
+			<td>неизвестно</td>
+			<td><code>2026-11-01 16:59:02,720</code></td>
+		</tr>
+		<tr>
+			<td>Кто и что</td>
+			<td>неизвестно</td>
+			<td>пользователь 111, <code>'/today'</code></td>
+		</tr>
+		<tr>
+			<td>Где упало</td>
+			<td>traceback</td>
+			<td>traceback</td>
+		</tr>
+	</tbody>
+</table>
+
+<p>Следующая строка: <code>Update id=14 is handled. Duration 5022 ms</code>. Обработчик ошибок справился, и для aiogram обновление считается обработанным. Пять секунд &mdash; ожидание базы.</p>
+
+<blockquote><strong>🔑 Обработчик ошибок &mdash; последний рубеж:</strong><br />
+<code>@router.errors()</code> получает исключение из любого хэндлера. Он записывает в журнал, кто и что прислал, вместе с traceback, и отвечает пользователю, чтобы тот не остался в тишине.</blockquote>
+
+
+<!-- ═══ ШАГ 8 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В боте подключён роутер <code>errors</code> из урока. Хэндлер <code>/stats</code> упал с исключением. Что увидит пользователь?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Сообщение &laquo;Что-то пошло не так. Попробуйте ещё раз через минуту.&raquo; ✅</li>
+	<li>Ничего: бот промолчит, ошибка уйдёт в журнал</li>
+	<li>Текст исключения, например <code>database is locked</code></li>
+	<li>Сообщение &laquo;Такой команды нет. Загляните в /menu&raquo;</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Подробности исключения уходят в журнал, а пользователь получает понятный текст из <code>texts.ERROR</code>.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Что делает <code>on_error()</code> после записи в журнал, если в обновлении есть сообщение? Попадёт ли упавший <code>/stats</code> в <code>fallback</code>?</p>
+
+
+<!-- ═══ ШАГ 9 · text · новый шаг ═══ -->
+
+<h2>🔁 6. Страховка цикла напоминаний</h2>
+
+<p>Вторая поломка: исключение в <code>send_due()</code> убивает цикл. Обработчик ошибок aiogram здесь не поможет: он ловит ошибки хэндлеров, а цикл напоминаний &mdash; не хэндлер, его запустили мы сами.</p>
+
+<p>Цикл должен пережить любую ошибку в одной проверке и попробовать снова через минуту. Замените <code>reminder_loop()</code> в <code>reminders.py</code>:</p>
+
+<pre><code class="language-python">async def reminder_loop(bot: Bot) -&gt; None:
+    while True:
+        try:
+            await send_due(bot, clock.now())
+        except Exception:
+            logger.exception("Сбой в цикле напоминаний, повтор через минуту")
+        await asyncio.sleep(60 - clock.now().second)</code></pre>
+
+<h3>Почему здесь except Exception</h3>
+
+<p>В уроке 8.3 мы ловили только ожидаемые ошибки сети, а <code>except Exception: pass</code> назвали опасным: он прячет ошибки нашего кода. Здесь же стоит <code>except Exception</code>. Противоречия нет &mdash; правило урока 2.6 звучало так: <code>except Exception</code> допустим как страховка, но только с обязательным логированием.</p>
+
+<p>Это ровно такой случай. Какие ошибки случатся в <code>send_due()</code>, мы заранее не знаем: занятая база, сбой Telegram, ошибка в нашем коде. Знаем одно: из-за любой из них цикл не должен остановиться навсегда. А чтобы ничего не спряталось, ошибка записывается.</p>
+
+<p><code>logger.exception()</code> &mdash; это <code>logger.error()</code>, который сам добавляет traceback текущего исключения. Работает только внутри <code>except</code>. В обработчике aiogram мы передавали исключение через <code>exc_info</code>: там его ловили не мы.</p>
+
+<p>Что <code>except Exception</code> не поймает &mdash; тоже по уроку 2.6: <code>KeyboardInterrupt</code> и <code>asyncio.CancelledError</code>. Они не наследуются от <code>Exception</code>. Поэтому <code>Ctrl+C</code> и <code>systemctl stop</code> по-прежнему останавливают бота, а не превращаются в &laquo;сбой, повтор через минуту&raquo;. Голый <code>except:</code> поймал бы и их.</p>
+
+<h3>Проверка</h3>
+
+<p>Повторяем опыт: база занята на стыке минут, у Бориса напоминание через две минуты. В терминале бота:</p>
+
+<pre><code>2026-11-01 16:59:05,834 ERROR reminders: Сбой в цикле напоминаний, повтор через минуту
+Traceback (most recent call last):
+  File "reminders.py", line 72, in reminder_loop
+    await send_due(bot, clock.now())
+  File "reminders.py", line 51, in send_due
+    for habit in await database.get_all_habits():
+  File "database.py", line 217, in get_all_habits
+    cursor = await db.execute(
+  ...
+sqlite3.OperationalError: database is locked</code></pre>
+
+<p>Ошибка записана: время, уровень, источник <code>reminders</code>, traceback. Время в журнале &mdash; UTC: <code>16:59</code> &mdash; это 19:59 по Москве. Цикл пережил ошибку и проснулся через минуту. Ровно в 20:00 Борис получил:</p>
+
+<pre><code>  Бот → Борис: ⏰ Пора: Бег
+       Отметьте, когда сделаете.
+
+       [ ⬜ Бег ]</code></pre>
+
+<p>Исправив обе поломки, остановим бота <code>Ctrl+C</code>:</p>
+
+<pre><code>2026-11-01 17:00:10,099 WARNING aiogram.dispatcher: Received SIGINT signal
+2026-11-01 17:00:10,099 INFO aiogram.dispatcher: Polling stopped for bot @habit_demo_bot id=123456789 - 'ПривычкаБот'
+2026-11-01 17:00:10,099 INFO aiogram.dispatcher: Polling stopped</code></pre>
+
+<p>Строки <code>Task exception was never retrieved</code> больше нет: задача не умирала.</p>
+
+<blockquote><strong>🔑 Фоновый цикл страхуется сам:</strong><br />
+Тело цикла &mdash; в <code>try</code>, в <code>except Exception</code> &mdash; <code>logger.exception()</code>. Одна неудачная проверка записывается в журнал, а цикл продолжает работать.</blockquote>
+
+
+<!-- ═══ ШАГ 10 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В <code>reminder_loop()</code> вместо <code>except Exception:</code> с <code>logger.exception()</code> написали голый <code>except:</code> с <code>pass</code>. Чем это плохо?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Ошибки пропадут бесследно, а <code>CancelledError</code> при остановке бота тоже будет пойман ✅</li>
+	<li>Ничем: цикл и так продолжит работать</li>
+	<li>Голый <code>except:</code> не ловит <code>database is locked</code></li>
+	<li>Цикл будет перезапускаться чаще раза в минуту</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Без записи в журнал цикл &laquo;работает&raquo;, но вы не узнаете, что напоминания не уходят. А голый <code>except:</code> перехватит и сигнал остановки &mdash; правило урока 2.6.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните урок 2.6: что ловит голый <code>except:</code>, кроме обычных ошибок? И как вы узнаете о сбое, если в <code>except</code> только <code>pass</code>?</p>
+
+
+<!-- ═══ ШАГ 11 · text · новый шаг ═══ -->
+
+<h2>🗂 7. Журнал на сервере</h2>
+
+<p>Обновим бота на сервере способом из урока 9.3. В архив попадут новый <code>handlers/errors.py</code> и изменённые файлы, а <code>habits.db</code> и <code>.env</code> останутся на месте:</p>
+
+<pre><code># дома
+tar -czf habit_bot.tar.gz --exclude=.venv --exclude=__pycache__ --exclude=habits.db --exclude=.env habit_bot
+scp habit_bot.tar.gz bot@203.0.113.10:~
+# на сервере под bot
+tar -xzf habit_bot.tar.gz
+# на сервере под root
+systemctl restart habitbot</code></pre>
+
+<p>Записи <code>logging</code> идут туда же, куда и всё, что печатает бот: в журнал systemd. Мы повторили аварию уже на сервере. Найти все ошибки за последние десять минут:</p>
+
+<pre><code>journalctl -u habitbot --since "10 min ago" | grep ERROR</code></pre>
+
+<pre><code>Nov 01 17:00:52 vm python[866]: 2026-11-01 17:00:52,968 ERROR handlers.errors: Ошибка в хэндлере: пользователь 111, событие '/today'</code></pre>
+
+<p><code>--since "10 min ago"</code> &mdash; записи за последние десять минут. Можно указать и время: <code>--since "2026-11-01 16:55"</code>. <code>| grep ERROR</code> оставляет только строки со словом <code>ERROR</code> &mdash; по одной на каждую ошибку. Найденное время дальше можно смотреть целиком: <code>journalctl -u habitbot --since "17:00" -n 40</code>.</p>
+
+<p>Заметьте, что время в строке стоит дважды. В начале &mdash; от журнала systemd, после <code>python[866]:</code> &mdash; от нашего формата. Дома, без systemd, второе время необходимо. На сервере оно лишнее, но не мешает, а одинаковый формат журнала дома и на сервере удобнее.</p>
+
+<h3>Привычка администратора</h3>
+
+<p>Раз в несколько дней загляните в журнал:</p>
+
+<pre><code>journalctl -u habitbot --since "3 days ago" | grep -E "ERROR|WARNING"</code></pre>
+
+<p>Пусто &mdash; хорошо. Есть строки &mdash; по времени найдите traceback и разберитесь. Повторяется <code>WARNING Погода недоступна</code> &mdash; проверьте, отвечает ли Open-Meteo с вашего сервера.</p>
+
+
+<!-- ═══ ШАГ 12 · text · новый шаг ═══ -->
+
+<h2>🔧 8. Если что-то не сошлось</h2>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Симптом</th>
+			<th>Где искать</th>
+		</tr>
+		<tr>
+			<td>В терминале нет строк <code>INFO</code>, ошибки без времени</td>
+			<td>Нет <code>logging.basicConfig()</code> в начале <code>main()</code></td>
+		</tr>
+		<tr>
+			<td>При ошибке пользователь не получает ответа, в журнале <code>Cause exception while process update</code></td>
+			<td>Роутер <code>errors</code> не подключён в <code>bot.py</code></td>
+		</tr>
+		<tr>
+			<td>При остановке <code>Task exception was never retrieved</code></td>
+			<td>В <code>reminder_loop()</code> нет <code>try</code>; напоминания перестали приходить в момент ошибки</td>
+		</tr>
+		<tr>
+			<td><code>ERROR handlers.errors: Ошибка в хэндлере</code> без traceback</td>
+			<td>В <code>logger.error()</code> нет <code>exc_info=event.exception</code></td>
+		</tr>
+		<tr>
+			<td><code>WARNING ... Не удалось сообщить пользователю</code></td>
+			<td>Telegram в этот момент недоступен; смотрите traceback записи выше</td>
+		</tr>
+		<tr>
+			<td>Ошибки <code>database is locked</code></td>
+			<td>Базу держит другая программа: открытый просмотрщик базы, незаконченное изменение. Закройте её</td>
+		</tr>
+	</tbody>
+</table>
+<!-- АВТОР: строки 1&ndash;3 и 6 получены на стенде; строки 4&ndash;5 &mdash; следствия кода, отдельно не воспроизводились -->
+
+
+<!-- ═══ ШАГ 13 · text · новый шаг ═══ -->
+
+<h2>📋 Итог урока 9.4</h2>
+
+<p>ПривычкаБот больше не молчит при ошибках и не теряет напоминания из-за одного сбоя. А по журналу видно, что случилось, когда и с кем.</p>
+
+<ul>
+	<li>✅ Упавший хэндлер без обработчика &mdash; тишина для пользователя и traceback без подробностей</li>
+	<li>✅ Исключение в задаче из <code>create_task()</code> тихо завершает задачу; systemd этого не видит</li>
+	<li>✅ <code>logging.basicConfig(level=logging.INFO, format=...)</code> в начале <code>main()</code>: время, уровень, источник</li>
+	<li>✅ <code>INFO</code> &mdash; обычное, <code>WARNING</code> &mdash; бот справился, <code>ERROR</code> &mdash; нужно чинить</li>
+	<li>✅ <code>@router.errors()</code> получает <code>ErrorEvent</code>: записывает пользователя, событие и traceback, отвечает пользователю</li>
+	<li>✅ Тело фонового цикла &mdash; в <code>try</code> с <code>except Exception</code> и <code>logger.exception()</code>; остановка бота при этом работает</li>
+	<li>✅ На сервере ошибки ищутся через <code>journalctl -u habitbot --since ... | grep ERROR</code></li>
+</ul>
+
+<h3>📝 Шпаргалка</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Запись</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td><code>logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)</code></td>
+			<td>Включить журнал от INFO и выше</td>
+		</tr>
+		<tr>
+			<td><code>logger = logging.getLogger(__name__)</code></td>
+			<td>Логгер модуля, подписан его именем</td>
+		</tr>
+		<tr>
+			<td><code>@router.errors()</code></td>
+			<td>Обработчик ошибок всех хэндлеров</td>
+		</tr>
+		<tr>
+			<td><code>event.exception</code>, <code>event.update</code></td>
+			<td>Исключение и обновление, на котором упали</td>
+		</tr>
+		<tr>
+			<td><code>logger.error("...", exc_info=exc)</code></td>
+			<td>Записать ошибку с traceback исключения <code>exc</code></td>
+		</tr>
+		<tr>
+			<td><code>logger.exception("...")</code></td>
+			<td>То же внутри <code>except</code>: traceback берётся сам</td>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot --since "1 day ago" | grep ERROR</code></td>
+			<td>Ошибки за сутки</td>
+		</tr>
+	</tbody>
+</table>
+
+<h3>Что изменилось в проекте</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Файл</th>
+			<th>Изменения</th>
+		</tr>
+		<tr>
+			<td><code>handlers/errors.py</code></td>
+			<td><strong>новый</strong>: роутер <code>errors</code>, <code>on_error()</code></td>
+		</tr>
+		<tr>
+			<td><code>bot.py</code></td>
+			<td><code>import logging</code>, <code>LOG_FORMAT</code>, <code>basicConfig()</code> в <code>main()</code>; роутер <code>errors</code> подключён первым</td>
+		</tr>
+		<tr>
+			<td><code>reminders.py</code></td>
+			<td>тело <code>reminder_loop()</code> в <code>try</code> / <code>except Exception</code></td>
+		</tr>
+		<tr>
+			<td><code>texts.py</code></td>
+			<td>добавлен <code>ERROR</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<details><summary>📄 bot.py целиком</summary>
+
+<pre><code class="language-python">import asyncio
+import logging
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import SimpleEventIsolation
+
+import database
+import reminders
+from config import TOKEN
+from handlers import add, common, errors, fallback, guard, habits
+
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+async def main() -&gt; None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    await database.init_db()
+
+    bot = Bot(
+        token=TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher(events_isolation=SimpleEventIsolation())
+
+    dp.include_router(errors.router)
+    dp.include_router(guard.router)
+    dp.include_router(common.router)
+    dp.include_router(habits.router)
+    dp.include_router(add.router)
+    dp.include_router(fallback.router)
+
+    reminder_task = asyncio.create_task(reminders.reminder_loop(bot))
+
+    print("ПривычкаБот запущен. Ctrl+C для остановки.")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("ПривычкаБот остановлен.")</code></pre>
+</details>
+
+<details><summary>📄 reminders.py целиком</summary>
+
+<pre><code class="language-python">"""Напоминания: бот сам пишет пользователям по расписанию."""
+import asyncio
+import logging
+from datetime import datetime, timedelta
+
+from aiogram import Bot, html
+from aiogram.exceptions import TelegramForbiddenError
+from aiogram.types import InlineKeyboardMarkup
+
+import clock
+import database
+import keyboards
+import texts
+from handlers.habits import build_morning_text
+
+MORNING_TIME = "07:30"
+CATCH_UP = timedelta(minutes=15)
+
+logger = logging.getLogger(__name__)
+
+
+def is_due(remind_time: str, now: datetime) -&gt; bool:
+    hours, minutes = remind_time.split(":")
+    planned = now.replace(
+        hour=int(hours), minute=int(minutes), second=0, microsecond=0
+    )
+    return planned &lt;= now &lt; planned + CATCH_UP
+
+
+async def deliver(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    markup: InlineKeyboardMarkup | None = None,
+) -&gt; None:
+    try:
+        await bot.send_message(user_id, text, reply_markup=markup)
+    except TelegramForbiddenError:
+        logger.warning("Пользователь %s заблокировал бота", user_id)
+
+
+async def send_due(bot: Bot, now: datetime) -&gt; None:
+    day = now.date()
+
+    if is_due(MORNING_TIME, now):
+        for user_id in await database.get_user_ids():
+            if await database.mark_sent(user_id, "morning", day):
+                text = await build_morning_text(user_id, day)
+                await deliver(bot, user_id, text)
+
+    for habit in await database.get_all_habits():
+        if not is_due(habit["remind_time"], now):
+            continue
+
+        user_id = habit["user_id"]
+        done_ids = await database.get_done_ids(user_id, day)
+        if habit["id"] in done_ids:
+            continue
+
+        if await database.mark_sent(user_id, f"habit_{habit['id']}", day):
+            await deliver(
+                bot,
+                user_id,
+                texts.REMINDER.format(name=html.quote(habit["name"])),
+                keyboards.reminder_keyboard(habit["id"], habit["name"]),
+            )
+
+
+async def reminder_loop(bot: Bot) -&gt; None:
+    while True:
+        try:
+            await send_due(bot, clock.now())
+        except Exception:
+            logger.exception("Сбой в цикле напоминаний, повтор через минуту")
+        await asyncio.sleep(60 - clock.now().second)</code></pre>
+</details>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>Модуль 9 почти пройден. Бот пишет сам, живёт на сервере, поднимается после сбоев и не молчит при ошибках. Осталось проверить всё вместе &mdash; не по частям, а как пользователь.</p>
+
+<p>Урок 9.5 &mdash; капстоун. Пройдём приёмку по всем модулям курса, позовём второго пользователя и сделаем то, ради чего всё затевалось: закроем ноутбук вечером, а утром получим сообщение от своего бота.</p>

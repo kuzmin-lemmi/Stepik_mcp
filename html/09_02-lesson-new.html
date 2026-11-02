@@ -1,0 +1,808 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 9.2. VPS: покупка, SSH, перенос кода, окружение</h2>
+
+<p><strong>Аннотация:</strong><br />
+В уроке 9.1 ПривычкаБот научился писать сам: утреннее сообщение в 07:30, напоминания о привычках. Но всё это работает, пока работает ваш компьютер. Закрыли ноутбук вечером &mdash; утром напоминание не придёт.</p>
+
+<p>Сегодня бот переедет на сервер &mdash; компьютер в дата-центре, который не выключается. Арендуем его, подключимся по SSH, перенесём проект, соберём окружение и запустим бота. И в конце увидим, чего пока не хватает, чтобы он работал без нас.</p>
+
+<p>Это практикум: каждую команду выполняете вы, и после каждого раздела есть проверка.</p>
+
+<blockquote><strong>🛠 Два компьютера:</strong><br />
+В уроке команды выполняются в двух местах. <strong>На вашем компьютере</strong> &mdash; в PowerShell (Windows) или терминале (macOS, Linux). <strong>На сервере</strong> &mdash; в том же окне, но после команды <code>ssh</code>. Различить их помогает приглашение терминала: на сервере оно выглядит как <code>bot@server:~$</code> или <code>root@server:~#</code>. Перед каждым блоком команд сказано, где его выполнять.</blockquote>
+
+<blockquote><strong>🎯 Что сделаем:</strong><br />
+&bull; Разберёмся, что такое VPS и что на него переносить &mdash; <strong>раздел 1</strong><br />
+&bull; Выберем и арендуем сервер &mdash; <strong>раздел 2</strong><br />
+&bull; Создадим SSH-ключ и войдём на сервер &mdash; <strong>разделы 3&ndash;4</strong><br />
+&bull; Заведём пользователя для бота &mdash; <strong>раздел 5</strong><br />
+&bull; Перенесём проект и соберём окружение &mdash; <strong>разделы 6&ndash;7</strong><br />
+&bull; Запустим бота на сервере &mdash; <strong>раздел 8</strong><br />
+&bull; Увидим две поломки, которые ждут каждого: две копии бота и закрытый терминал &mdash; <strong>разделы 9&ndash;10</strong></blockquote>
+
+<h2>🖥 1. Что такое VPS</h2>
+
+<p>VPS (virtual private server) &mdash; виртуальный сервер: часть мощного компьютера в дата-центре, которую вам сдают в аренду. Для вас она выглядит как отдельный компьютер со своей системой, своим адресом в интернете и правами администратора. Только без экрана и клавиатуры: управляют им по сети, командами в терминале.</p>
+
+<p>Боту от сервера нужно три вещи: чтобы он не выключался, был в интернете и на нём был Python. Всё остальное &mdash; ваш проект, который сейчас лежит в папке <code>habit_bot</code>.</p>
+
+<h3>Что переносим, а что нет</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Что</th>
+			<th>Переносим?</th>
+			<th>Почему</th>
+		</tr>
+		<tr>
+			<td>файлы <code>.py</code>, <code>handlers/</code></td>
+			<td>да</td>
+			<td>это сам бот</td>
+		</tr>
+		<tr>
+			<td><code>requirements.txt</code></td>
+			<td>да</td>
+			<td>по нему сервер соберёт окружение (уроки 1.1, 4.2)</td>
+		</tr>
+		<tr>
+			<td><code>.env</code></td>
+			<td>да, бережно</td>
+			<td>в нём токен; без него бот не запустится</td>
+		</tr>
+		<tr>
+			<td><code>habits.db</code></td>
+			<td>да, если нужны данные</td>
+			<td>привычки, отметки и города пользователей</td>
+		</tr>
+		<tr>
+			<td><code>.venv/</code></td>
+			<td><strong>нет</strong></td>
+			<td>окружение собрано под вашу систему; на сервере соберём своё</td>
+		</tr>
+		<tr>
+			<td><code>__pycache__/</code></td>
+			<td><strong>нет</strong></td>
+			<td>Python создаст заново при первом запуске</td>
+		</tr>
+	</tbody>
+</table>
+
+<p>Почему <code>.venv</code> нельзя скопировать вместе с остальным? Загляните в него на Windows: там <code>Scripts\python.exe</code> &mdash; программа для Windows. На сервере Linux, ему нужен <code>bin/python</code>. Часть библиотек, например <code>aiohttp</code> и <code>pydantic</code>, содержит скомпилированный код под конкретную систему. Окружение не переносят, его собирают заново по <code>requirements.txt</code> &mdash; ради этого файла мы и записывали его с урока 1.1.</p>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>🛒 2. Выбираем сервер</h2>
+
+<p>VPS сдают в аренду многие компании, и тарифы постоянно меняются, поэтому конкретного провайдера и цен в уроке не будет. Вместо этого &mdash; на что смотреть.</p>
+
+<ul>
+	<li><strong>Система &mdash; Ubuntu 24.04 LTS.</strong> В ней Python 3.12, как в курсе. LTS &mdash; версия с долгой поддержкой: обновления безопасности выходят годами.</li>
+	<li><strong>Самый маленький тариф.</strong> 1 ядро и 1 ГБ памяти &mdash; с большим запасом: запущенный ПривычкаБот на стенде занял около 100 МБ.</li>
+	<li><strong>Публичный IPv4-адрес.</strong> По нему вы будете подключаться к серверу.</li>
+	<li><strong>Помесячная оплата.</strong> Для учебного проекта не нужно платить за год вперёд.</li>
+	<li><strong>Вход по SSH-ключу.</strong> Почти все провайдеры предлагают при создании сервера вставить публичный ключ. Его мы создадим в разделе 3 &mdash; сделайте это до заказа сервера.</li>
+</ul>
+
+<blockquote><strong>⚠️ Серверу нужен доступ к Telegram:</strong><br />
+Бот общается с серверами Telegram по адресу <code>api.telegram.org</code>. Если в стране, где стоит сервер, этот адрес недоступен, бот не запустится: при старте он упадёт с ошибкой соединения. Перед оплатой проверьте у провайдера, в какой стране дата-центр, и выбирайте ту локацию, откуда Telegram доступен.</blockquote>
+
+<p>После создания сервера провайдер покажет его <strong>IP-адрес</strong> &mdash; четыре числа через точку. В уроке это <code>203.0.113.10</code>: так обозначают адреса в учебных примерах. Везде, где он встречается, подставляйте адрес своего сервера.</p>
+<!-- АВТОР: скриншоты панели выбранного провайдера: выбор Ubuntu 24.04, поле для SSH-ключа, IP-адрес после создания -->
+
+<blockquote><strong>📌 Как проверялся урок:</strong><br />
+Все команды мы выполнили на стенде: чистая Ubuntu 24.04 с SSH-сервером &mdash; на месте VPS, и отдельный пользователь &mdash; на месте вашего компьютера. Вывод команд настоящий. Адрес заменён на учебный, а приветствие сервера после входа у разных провайдеров разное, поэтому мы оставили только его первую строку.</blockquote>
+
+
+<!-- ═══ ШАГ 3 · text · новый шаг ═══ -->
+
+<h2>🔑 3. SSH-ключ</h2>
+
+<p>SSH &mdash; программа для работы с удалённым компьютером: вы печатаете команды у себя, а выполняются они на сервере. В Windows 10 и 11, macOS и Linux она уже встроена.</p>
+
+<p>Входить на сервер можно по паролю или по ключу. Мы будем по ключу, а почему &mdash; разберём после того, как его создадим.</p>
+
+<h3>Шаг 1. Создать ключ</h3>
+
+<p><strong>На вашем компьютере</strong> выполните:</p>
+
+<pre><code>ssh-keygen -t ed25519 -C "habit_bot"</code></pre>
+
+<p>Программа задаст три вопроса. На все три нажмите <code>Enter</code>: файл по умолчанию, без пароля на ключ.</p>
+
+<pre><code>Generating public/private ed25519 key pair.
+Enter file in which to save the key (/home/anton/.ssh/id_ed25519): 
+Created directory '/home/anton/.ssh'.
+Enter passphrase (empty for no passphrase): 
+Enter same passphrase again: 
+Your identification has been saved in /home/anton/.ssh/id_ed25519
+Your public key has been saved in /home/anton/.ssh/id_ed25519.pub
+The key fingerprint is:
+SHA256:SxiWA6lNVPGPyM4OJzGklQXDxOEjKMXgwFMV9vGvaeI habit_bot
+The key's randomart image is:
++--[ED25519 256]--+
+|+oo*OO=o         |
+|o=..*=.oo        |
+|o.o+* =...       |
+|. .=.+ = o.      |
+|  . o + S ..     |
+|     = . .o      |
+|    o +..+       |
+|     =. o        |
+|      .E         |
++----[SHA256]-----+</code></pre>
+
+<p>На Windows путь будет вида <code>C:\Users\имя/.ssh/id_ed25519</code>, остальное совпадёт. Отпечаток и картинка у вас будут свои: ключ каждый раз создаётся случайным.</p>
+
+<p><code>-t ed25519</code> &mdash; тип ключа, современный и короткий. <code>-C "habit_bot"</code> &mdash; комментарий, чтобы потом узнать, зачем ключ создан.</p>
+
+<h3>Шаг 2. Два файла</h3>
+
+<pre><code>ls ~/.ssh</code></pre>
+
+<pre><code>id_ed25519  id_ed25519.pub</code></pre>
+
+<ul>
+	<li><code>id_ed25519</code> &mdash; <strong>закрытый</strong> ключ. Остаётся на вашем компьютере. Никому не отправляйте и никуда не загружайте.</li>
+	<li><code>id_ed25519.pub</code> &mdash; <strong>открытый</strong> ключ (pub &mdash; public). Его отдают серверу. Показать его можно не опасаясь.</li>
+</ul>
+
+<p>Выведите открытый ключ и скопируйте строку целиком:</p>
+
+<pre><code>cat ~/.ssh/id_ed25519.pub</code></pre>
+
+<pre><code>ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBamQb24LJzOK8+DFBjFH5pDmDLEj0vfnlkDGFXmBjDY habit_bot</code></pre>
+
+<p>В PowerShell эта команда тоже работает.</p>
+
+<p>Эту строку вставьте в поле SSH-ключа при создании сервера.</p>
+
+<h3>Как это работает</h3>
+
+<p>Сервер хранит открытый ключ. При входе он присылает задачу, которую можно решить только закрытым ключом. Ваш компьютер решает её и отправляет ответ. Сам закрытый ключ по сети не передаётся ни разу.</p>
+
+<p>С паролем иначе: пароль уходит на сервер при каждом входе, и его можно подобрать. Серверы в интернете перебирают пароли постоянно &mdash; автоматически, тысячами попыток. Ключ ed25519 подобрать перебором невозможно.</p>
+
+<blockquote><strong>💡 Пароль на ключ:</strong><br />
+Мы оставили ключ без пароля, чтобы не вводить его при каждом подключении. Если кто-то получит доступ к вашему компьютеру, он получит и ключ. Для учебного сервера это приемлемо, для рабочего лучше задать пароль на ключ.</blockquote>
+
+<blockquote><strong>🔑 Закрытый ключ &mdash; у вас, открытый &mdash; на сервере:</strong><br />
+<code>ssh-keygen</code> создаёт пару файлов. <code>.pub</code> отдают серверу, файл без расширения не покидает ваш компьютер.</blockquote>
+
+
+<!-- ═══ ШАГ 4 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему на сервер лучше входить по SSH-ключу, а не по паролю?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Закрытый ключ не передаётся по сети и не подбирается перебором ✅</li>
+	<li>По ключу соединение работает быстрее</li>
+	<li>По паролю нельзя выполнять команды с правами администратора</li>
+	<li>Открытый ключ надёжнее спрятан, чем пароль</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Сервер проверяет, что у вас есть закрытый ключ, не получая его самого. А открытый ключ прятать незачем &mdash; по нему войти нельзя.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Перечитайте &laquo;Как это работает&raquo; в разделе 3. Что уходит на сервер при входе по паролю, а что &mdash; при входе по ключу?</p>
+
+
+<!-- ═══ ШАГ 5 · text · новый шаг ═══ -->
+
+<h2>🚪 4. Первый вход</h2>
+
+<p>Сервер создан, ключ на нём. <strong>На вашем компьютере</strong>:</p>
+
+<pre><code>ssh root@203.0.113.10</code></pre>
+
+<p><code>root</code> &mdash; администратор, единственный пользователь на новом сервере. При первом подключении SSH спросит, доверяете ли вы этому серверу. Ответьте <code>yes</code>:</p>
+
+<pre><code>The authenticity of host '203.0.113.10 (203.0.113.10)' can't be established.
+ED25519 key fingerprint is SHA256:8SEMH2QprM6DmD+TAin3t85u9E1aKT7lnTLaCZk53ps.
+This key is not known by any other names.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added '203.0.113.10' (ED25519) to the list of known hosts.
+Welcome to Ubuntu 24.04.5 LTS (GNU/Linux 6.18.44-fc-v185 x86_64)
+...</code></pre>
+
+<p>Что произошло. У сервера тоже есть ключ, и SSH видит его впервые. <code>yes</code> записывает его в файл <code>known_hosts</code> на вашем компьютере. В следующий раз SSH сверит ключ сервера с записанным и, если ключ другой, откажется подключаться: так он защищает от подмены сервера. Что делать, если вы сами переустановили сервер, &mdash; в таблице в конце урока.</p>
+
+<p>Пароль не спросили: сработал ключ. Приглашение терминала сменилось на <code>root@server:~#</code>. Теперь всё, что вы печатаете, выполняется на сервере. Проверим:</p>
+
+<pre><code>whoami</code></pre>
+
+<pre><code>root</code></pre>
+
+<h3>Обновить систему</h3>
+
+<p>Первое, что делают на новом сервере, &mdash; ставят обновления безопасности. <strong>На сервере</strong>:</p>
+
+<pre><code>apt update
+apt upgrade -y</code></pre>
+
+<p><code>apt</code> &mdash; установщик программ в Ubuntu, как <code>pip</code> для Python. <code>apt update</code> узнаёт, что нового, <code>apt upgrade -y</code> ставит обновления, не спрашивая подтверждения. Первая команда закончится строкой вроде этой, число у вас будет своё:</p>
+
+<pre><code>101 packages can be upgraded. Run 'apt list --upgradable' to see them.</code></pre>
+
+<p>Вторая может занять несколько минут. Если появится окно с вопросом о перезапуске служб &mdash; нажмите <code>Enter</code>, вариант по умолчанию подходит.</p>
+
+
+<!-- ═══ ШАГ 6 · text · новый шаг ═══ -->
+
+<h2>👤 5. Пользователь для бота</h2>
+
+<p>Можно запустить бота прямо от <code>root</code>. Но <code>root</code> может на сервере всё: удалить любой файл, сломать систему. Если в коде бота окажется ошибка или в одной из библиотек &mdash; уязвимость, у неё будут те же права. Правило простое: у программы ровно столько прав, сколько ей нужно. Боту нужна своя папка, а не весь сервер.</p>
+
+<h3>Шаг 1. Создать пользователя</h3>
+
+<p><strong>На сервере</strong>, всё ещё под <code>root</code>:</p>
+
+<pre><code>adduser bot</code></pre>
+
+<p>Программа попросит пароль дважды &mdash; при вводе символы не отображаются, это нормально. Запишите пароль: он понадобится, если ключ когда-нибудь потеряется. Остальные вопросы пропустите <code>Enter</code>, на последний ответьте <code>Y</code>:</p>
+
+<pre><code>info: Adding user `bot' ...
+info: Selecting UID/GID from range 1000 to 59999 ...
+info: Adding new group `bot' (1001) ...
+info: Adding new user `bot' (1001) with group `bot (1001)' ...
+info: Creating home directory `/home/bot' ...
+info: Copying files from `/etc/skel' ...
+New password: 
+Retype new password: 
+passwd: password updated successfully
+Changing the user information for bot
+Enter the new value, or press ENTER for the default
+	Full Name []: 
+	Room Number []: 
+	Work Phone []: 
+	Home Phone []: 
+	Other []: 
+Is the information correct? [Y/n] Y
+info: Adding new user `bot' to supplemental / extra groups `users' ...
+info: Adding user `bot' to group `users' ...</code></pre>
+
+<h3>Шаг 2. Дать пользователю ваш ключ</h3>
+
+<p>Ключ, который вы указали при создании сервера, лежит у <code>root</code> в <code>~/.ssh/authorized_keys</code> &mdash; список ключей, которым разрешён вход. Скопируем его пользователю <code>bot</code>:</p>
+
+<pre><code>mkdir -p /home/bot/.ssh
+cp ~/.ssh/authorized_keys /home/bot/.ssh/
+chown -R bot:bot /home/bot/.ssh
+chmod 700 /home/bot/.ssh</code></pre>
+
+<p>Команды ничего не печатают. По строкам:</p>
+
+<ul>
+	<li><code>mkdir -p</code> &mdash; создать папку <code>.ssh</code> в домашней папке <code>bot</code>;</li>
+	<li><code>cp</code> &mdash; скопировать в неё список ключей;</li>
+	<li><code>chown -R bot:bot</code> &mdash; сделать <code>bot</code> владельцем: файлы создавал <code>root</code>, и они принадлежат ему;</li>
+	<li><code>chmod 700</code> &mdash; закрыть папку от всех, кроме владельца. SSH проверяет это и не примет ключ из папки, которую могут читать другие.</li>
+</ul>
+
+<h3>Шаг 3. Войти под bot</h3>
+
+<p>Выйдите с сервера и войдите заново, уже как <code>bot</code>. <strong>На сервере</strong>:</p>
+
+<pre><code>exit</code></pre>
+
+<pre><code>logout
+Connection to 203.0.113.10 closed.</code></pre>
+
+<p><strong>На вашем компьютере</strong>:</p>
+
+<pre><code>ssh bot@203.0.113.10</code></pre>
+
+<p>Вопроса про ключ сервера больше нет: он записан в <code>known_hosts</code>. Проверим, кто мы и какой здесь Python:</p>
+
+<pre><code>whoami</code></pre>
+
+<pre><code>bot</code></pre>
+
+<pre><code>python3 --version</code></pre>
+
+<pre><code>Python 3.12.3</code></pre>
+
+<p>Python 3.12 уже есть в системе &mdash; ставить его не нужно. Дальше всё, что касается бота, делаем под <code>bot</code>. Под <code>root</code> будем заходить, только чтобы устанавливать программы.</p>
+
+<blockquote><strong>❗ Если вход не удался:</strong><br />
+<br />
+<strong><code>Permission denied (publickey,password)</code></strong> &mdash; сервер не нашёл вашего ключа у этого пользователя. Проверьте шаг 2: скопирован ли <code>authorized_keys</code> и сделан ли <code>chown</code>. Так выглядит отказ на стенде для пользователя без ключа:<br />
+<br />
+<code>ghost@203.0.113.10: Permission denied (publickey,password).</code><br />
+<br />
+<strong><code>Connection timed out</code></strong> &mdash; неверный IP или сервер ещё создаётся.</blockquote>
+
+
+<!-- ═══ ШАГ 7 · text · новый шаг ═══ -->
+
+<h2>📦 6. Переносим проект</h2>
+
+<h3>Шаг 1. Остановить бота дома</h3>
+
+<p>Если бот запущен на вашем компьютере, остановите его <code>Ctrl+C</code>. Почему это важно, увидим в разделе 9. И ещё одна причина: <code>habits.db</code> должен быть в законченном состоянии &mdash; копировать базу, в которую прямо сейчас пишут, не стоит.</p>
+
+<h3>Шаг 2. Упаковать</h3>
+
+<p>Проект &mdash; это папка с подпапками, а <code>.venv</code> и <code>__pycache__</code> брать не нужно. Удобнее всего упаковать нужное в один архив. <strong>На вашем компьютере</strong>, в папке, где лежит <code>habit_bot</code>:</p>
+
+<pre><code>tar -czf habit_bot.tar.gz --exclude=.venv --exclude=__pycache__ habit_bot</code></pre>
+
+<p><code>tar</code> &mdash; архиватор. Он есть в Windows 10 и 11, macOS и Linux. <code>-czf</code> &mdash; создать (create) сжатый (gzip) архив в файл (file) <code>habit_bot.tar.gz</code>. <code>--exclude</code> &mdash; что не брать. Проверим, что архив появился:</p>
+
+<pre><code>ls -lh habit_bot.tar.gz</code></pre>
+
+<pre><code>-rw-rw-r-- 1 anton anton 12K Nov  1 16:08 habit_bot.tar.gz</code></pre>
+
+<p>Двенадцать килобайт: в архиве только код, тексты и база. Окружение весило бы десятки мегабайт.</p>
+
+<h3>Шаг 3. Отправить на сервер</h3>
+
+<pre><code>scp habit_bot.tar.gz bot@203.0.113.10:~</code></pre>
+
+<pre><code>habit_bot.tar.gz   100%   11KB   21.1MB/s   00:00</code></pre>
+
+<p><code>scp</code> &mdash; копирование через SSH: тот же ключ, то же шифрование. <code>bot@203.0.113.10:~</code> &mdash; куда: в домашнюю папку пользователя <code>bot</code>. Файл с токеном внутри архива едет по защищённому каналу.</p>
+
+<h3>Шаг 4. Распаковать</h3>
+
+<p><strong>На сервере</strong>, под <code>bot</code>:</p>
+
+<pre><code>tar -xzf habit_bot.tar.gz
+ls -a habit_bot</code></pre>
+
+<pre><code>.  ..  .env  bot.py  clock.py  config.py  database.py  habits.db  handlers  keyboards.py  reminders.py  requirements.txt  states.py  streak.py  texts.py  validators.py  weather.py</code></pre>
+
+<p><code>-x</code> &mdash; распаковать (extract). <code>ls -a</code> показывает и скрытые файлы, имена которых начинаются с точки. <code>.env</code> на месте, <code>.venv</code> и <code>__pycache__</code> нет &mdash; как и задумано.</p>
+
+<blockquote><strong>⚠️ .env &mdash; только так:</strong><br />
+Если вы храните проект на GitHub, <code>.env</code> туда попасть не должен: в нём токен, а с токеном любой может управлять вашим ботом. На сервер его переносят напрямую, как мы сейчас, через <code>scp</code>. Если токен всё же утёк &mdash; выпустите новый в BotFather командой <code>/revoke</code>, старый перестанет работать.</blockquote>
+
+
+<!-- ═══ ШАГ 8 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему папку <code>.venv</code> не переносят на сервер вместе с проектом?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Окружение собрано под систему вашего компьютера; на сервере его собирают заново по <code>requirements.txt</code> ✅</li>
+	<li>В ней хранится токен, и переносить её небезопасно</li>
+	<li>Сервер сам найдёт библиотеки в интернете при запуске бота</li>
+	<li>Её можно перенести, а исключают её только ради размера архива</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. В окружении Windows лежит <code>Scripts\python.exe</code> и скомпилированные под Windows части библиотек. Linux их запустить не сможет.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Где лежит токен &mdash; в <code>.venv</code> или в <code>.env</code>? Что находится внутри <code>.venv</code> на Windows и можно ли это запустить на Linux?</p>
+
+
+<!-- ═══ ШАГ 9 · text · новый шаг ═══ -->
+
+<h2>🧪 7. Окружение на сервере</h2>
+
+<p>Те же шаги, что в уроке 4.2: создать окружение, активировать, поставить библиотеки. <strong>На сервере</strong>, под <code>bot</code>:</p>
+
+<pre><code>cd habit_bot
+python3 -m venv .venv</code></pre>
+
+<pre><code>The virtual environment was not created successfully because ensurepip is not
+available.  On Debian/Ubuntu systems, you need to install the python3-venv
+package using the following command.
+
+    apt install python3.12-venv
+
+You may need to use sudo with that command.  After installing the python3-venv
+package, recreate your virtual environment.
+
+Failing command: /home/bot/habit_bot/.venv/bin/python3</code></pre>
+
+<p>Первая неожиданность. В Ubuntu Python установлен, а модуль для создания окружений &mdash; отдельный пакет, и на чистом сервере его нет. Сообщение само говорит, что делать: <code>apt install python3.12-venv</code>. Но устанавливать программы может только администратор, а мы &mdash; <code>bot</code>.</p>
+
+<p>Выйдите (<code>exit</code>), войдите как <code>root</code> (<code>ssh root@203.0.113.10</code>) и выполните:</p>
+
+<pre><code>apt install -y python3.12-venv</code></pre>
+
+<pre><code>...
+Setting up python3.12-venv (3.12.3-1ubuntu0.17) ...</code></pre>
+
+<p>Снова <code>exit</code> и <code>ssh bot@203.0.113.10</code>. Неудачная попытка оставила недоделанную папку <code>.venv</code> &mdash; удалим её и создадим окружение заново:</p>
+
+<pre><code>cd habit_bot
+rm -rf .venv
+python3 -m venv .venv
+source .venv/bin/activate
+which python</code></pre>
+
+<pre><code>/home/bot/habit_bot/.venv/bin/python</code></pre>
+
+<p>Окружение создано и активно: <code>python</code> теперь ведёт внутрь <code>.venv</code>, а в начале приглашения появилось <code>(.venv)</code>. Обратите внимание на путь: на Linux окружение активируют через <code>source .venv/bin/activate</code>, а не <code>Scripts\Activate.ps1</code>, как на Windows.</p>
+
+<h3>Библиотеки</h3>
+
+<pre><code>python -m pip install -r requirements.txt</code></pre>
+
+<p>Вывод длинный: <code>pip</code> скачивает каждую библиотеку. Последняя строка:</p>
+
+<pre><code>Successfully installed aiofiles-25.1.0 aiogram-3.28.2 aiohappyeyeballs-2.7.1 aiohttp-3.13.5 aiosignal-1.4.0 aiosqlite-0.22.1 annotated-types-0.8.0 attrs-26.1.0 certifi-2026.10.23 frozenlist-1.8.0 idna-3.20 magic-filter-1.0.12 multidict-6.9.1 propcache-0.5.4 pydantic-2.13.5 pydantic_core-2.46.5 python-dotenv-1.2.4 typing-inspection-0.4.4 typing_extensions-4.16.0 tzdata-2026.6 yarl-1.25.1</code></pre>
+
+<p>Те же версии, что у вас дома, включая <code>tzdata</code> из урока 9.1. Ради этого момента мы и записывали <code>requirements.txt</code>: окружение на сервере совпадает с вашим до последней цифры.</p>
+
+<blockquote><strong>❗ Если не сошлось:</strong><br />
+<br />
+<strong><code>ERROR: Could not open requirements file</code></strong> &mdash; вы не в папке <code>habit_bot</code>: выполните <code>cd ~/habit_bot</code>.<br />
+<br />
+<strong><code>ERROR: No matching distribution found for pywin32</code></strong> или другого пакета с <code>win</code> в имени &mdash; в <code>requirements.txt</code> попала библиотека только для Windows. Удалите эту строку из файла на сервере и повторите.</blockquote>
+<!-- АВТОР: строка про pywin32 &mdash; типовая ошибка, на стенде не воспроизводилась: в requirements.txt курса таких пакетов нет -->
+
+
+<!-- ═══ ШАГ 10 · text · новый шаг ═══ -->
+
+<h2>🚀 8. Запуск на сервере</h2>
+
+<h3>Сначала &mdash; часы</h3>
+
+<p>В уроке 9.1 мы обещали, что часы сервера покажут не московское время. <strong>На сервере</strong>:</p>
+
+<pre><code>date</code></pre>
+
+<pre><code>Sun Nov  1 16:08:53 UTC 2026</code></pre>
+
+<p><code>UTC</code> &mdash; сервер живёт по Гринвичу, на три часа раньше Москвы. А теперь часы бота:</p>
+
+<pre><code>python -c "import clock; print(clock.now())"</code></pre>
+
+<pre><code>2026-11-01 19:08:56.341296+03:00</code></pre>
+
+<p><code>+03:00</code> &mdash; московское время. <code>clock.py</code> окупился: напоминание на 07:30 придёт в 07:30 по Москве, а не в 10:30. Без него пришлось бы перенастраивать часы сервера или переписывать хэндлеры уже здесь.</p>
+
+<h3>Запуск</h3>
+
+<p>Из папки <code>habit_bot</code>, с активным окружением:</p>
+
+<pre><code>python bot.py</code></pre>
+
+<pre><code>ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<p>Откройте бота в Telegram и отправьте <code>/today</code>:</p>
+
+<pre><code>  Аня: /today
+  Бот: Мои привычки на сегодня
+       текущая дата
+
+       Выполнено: 0 из 2
+
+       [ ⬜ Растяжка ]
+       [ ⬜ Чтение ]</code></pre>
+
+<p>Привычки Ани на месте: они приехали в <code>habits.db</code>. Бот отвечает с сервера &mdash; ваш компьютер можно выключить.</p>
+
+<p>Остановите бота <code>Ctrl+C</code>:</p>
+
+<pre><code>^CReceived SIGINT signal</code></pre>
+
+<p>Эту строку печатает aiogram: он сам перехватил <code>Ctrl+C</code> и аккуратно завершил опрос.</p>
+
+<h3>Важно, откуда запускать</h3>
+
+<p>Что будет, если запустить бота, находясь не в папке проекта? Мы проверили:</p>
+
+<pre><code>cd ~
+python habit_bot/bot.py</code></pre>
+
+<pre><code>ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<p>Бот запустился, токен нашёлся. Но на <code>/today</code> Аня видит:</p>
+
+<pre><code>  Аня: /today
+  Бот: Мои привычки на сегодня
+       текущая дата
+
+       У вас пока нет привычек.
+       Добавьте первую командой /add</code></pre>
+
+<p>Привычки пропали? Посмотрим, что лежит в домашней папке:</p>
+
+<pre><code>ls</code></pre>
+
+<pre><code>bin  habit_bot  habit_bot.tar.gz  habits.db</code></pre>
+
+<p>Рядом с папкой проекта появился новый пустой <code>habits.db</code>. Помните урок 7.2: путь <code>"habits.db"</code> считается от папки, откуда запущен терминал, а не от папки с <code>bot.py</code>. Бот создал новую базу там, где стоял терминал. Привычки Ани целы &mdash; в <code>habit_bot/habits.db</code>.</p>
+
+<p>А токен нашёлся потому, что <code>load_dotenv()</code> ищет <code>.env</code> от папки файла, который его вызвал, &mdash; <code>config.py</code>. У базы такого поиска нет.</p>
+
+<p>Удалите лишнюю базу и запускайте из папки проекта:</p>
+
+<pre><code>rm ~/habits.db
+cd ~/habit_bot
+python bot.py</code></pre>
+
+<blockquote><strong>🔑 Бот запускается из папки проекта:</strong><br />
+Сначала <code>cd ~/habit_bot</code>, потом <code>python bot.py</code>. Иначе бот создаст новую пустую базу там, где стоит терминал.</blockquote>
+
+
+<!-- ═══ ШАГ 11 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> На сервере пользователь <code>bot</code> находится в домашней папке и выполняет <code>python habit_bot/bot.py</code>. Какую базу откроет бот?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Новую пустую <code>~/habits.db</code>: путь считается от папки, где стоит терминал ✅</li>
+	<li><code>~/habit_bot/habits.db</code>: путь считается от папки с <code>bot.py</code></li>
+	<li>Никакую: бот упадёт с <code>FileNotFoundError</code></li>
+	<li>Ту же, что дома: база хранится в Telegram</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Относительный путь <code>"habits.db"</code> отсчитывается от текущей папки. <code>aiosqlite.connect()</code> не находит файл и создаёт новый.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните урок 7.2 и проверку в разделе 8: что показал <code>ls</code> в домашней папке после такого запуска?</p>
+
+
+<!-- ═══ ШАГ 12 · text · новый шаг ═══ -->
+
+<h2>👯 9. Две копии одного бота</h2>
+
+<p>Самая частая поломка после переезда. Бот запущен на сервере, а дома вы по привычке тоже запустили <code>python bot.py</code>. Мы проверили, что увидит терминал на сервере:</p>
+
+<pre><code>Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 123456789)
+Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Sleep for 1.421264 seconds and try again... (tryings = 1, bot id = 123456789)
+Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Sleep for 1.879464 seconds and try again... (tryings = 2, bot id = 123456789)
+Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Sleep for 2.372833 seconds and try again... (tryings = 3, bot id = 123456789)
+Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+Sleep for 2.950947 seconds and try again... (tryings = 4, bot id = 123456789)</code></pre>
+
+<p>И дома то же самое. Разберём сообщение:</p>
+
+<ul>
+	<li><code>TelegramConflictError</code> &mdash; Telegram ответил ошибкой конфликта;</li>
+	<li><code>terminated by other getUpdates request</code> &mdash; ваш запрос обновлений прерван другим запросом;</li>
+	<li><code>make sure that only one bot instance is running</code> &mdash; убедитесь, что запущена одна копия бота.</li>
+</ul>
+
+<p>Бот получает сообщения так: постоянно спрашивает Telegram &laquo;есть что-нибудь новое?&raquo; &mdash; это и есть опрос, <code>start_polling()</code> из урока 4.2. С одним токеном Telegram разрешает только один такой запрос в каждый момент. Две копии перебивают друг друга, и обе получают ошибку. aiogram ждёт и пробует снова, каждый раз чуть дольше: <code>Sleep for 1.0 ... 1.4 ... 1.9</code>. Пока копии перебивают друг друга, бот отвечает с перебоями.</p>
+
+<p>Остановите домашнюю копию &mdash; серверная перестанет ругаться и продолжит работу. Мы проверили: после остановки домашней копии Аня отправила <code>/today</code>, и ответил бот на сервере.</p>
+
+<blockquote><strong>💡 Второй бот для опытов:</strong><br />
+Хочется менять код дома и проверять его, не останавливая бота на сервере? Создайте в BotFather второго бота, например <code>habit_test_bot</code>. Его токен положите в <code>.env</code> на своём компьютере, а на сервере оставьте токен основного бота. Два разных токена &mdash; два разных бота, конфликта нет.</blockquote>
+
+<blockquote><strong>🔑 Один токен &mdash; одна запущенная копия:</strong><br />
+<code>TelegramConflictError</code> значит, что бот с этим токеном запущен где-то ещё. Найдите вторую копию и остановите её.</blockquote>
+
+
+<!-- ═══ ШАГ 13 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В терминале сервера раз за разом появляется <code>TelegramConflictError: ... terminated by other getUpdates request</code>. Что это значит?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Бот с этим токеном запущен ещё где-то, и две копии перебивают друг друга ✅</li>
+	<li>Telegram заблокировал сервер, нужно сменить провайдера</li>
+	<li>В коде два хэндлера на одну команду</li>
+	<li>Токен в <code>.env</code> неверный</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Чаще всего вторая копия &mdash; на вашем компьютере. Остановите её, и ошибки прекратятся.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Переведите последнюю часть сообщения: <code>make sure that only one bot instance is running</code>. О чём просит Telegram?</p>
+
+
+<!-- ═══ ШАГ 14 · text · новый шаг ═══ -->
+
+<h2>🚪 10. Закрыли терминал &mdash; бот умер</h2>
+
+<p>Бот работает на сервере. Вы закрываете окно терминала и идёте спать. Проверим, что будет. Мы запустили бота через SSH, как в разделе 8, и проверили из другого окна, что он работает:</p>
+
+<pre><code>pgrep -af 'python bot.py'</code></pre>
+
+<pre><code>3622 python bot.py</code></pre>
+
+<p><code>pgrep -af</code> ищет запущенные программы по тексту команды и печатает номер процесса и команду. Бот работает. Теперь закрываем окно, где он запущен, подключаемся заново и ищем снова:</p>
+
+<pre><code>pgrep -af 'python bot.py'</code></pre>
+
+<pre><code>(пусто)</code></pre>
+
+<p>Бота нет. Закрытие окна оборвало SSH-сессию, а все программы, запущенные в ней, система завершила вместе с сессией. Так задумано: сессия принадлежит человеку, который в неё вошёл, и уходит вместе с ним.</p>
+
+<p>Значит, запускать бота руками в терминале &mdash; не решение. Нужен кто-то на сервере, кто запустит его сам, будет держать запущенным без всяких сессий, поднимет после сбоя и после перезагрузки сервера. В Ubuntu это умеет <code>systemd</code> &mdash; им займёмся в уроке 9.3.</p>
+
+<blockquote><strong>⚠️ Про nohup и screen:</strong><br />
+В статьях часто советуют запускать бота через <code>nohup</code>, <code>screen</code> или <code>tmux</code>, чтобы он пережил закрытие терминала. Это работает, но только до первого сбоя: упадёт бот или перезагрузится сервер &mdash; и никто его не поднимет. В уроке 9.3 сделаем как положено.</blockquote>
+
+<h2>🔧 11. Если что-то не сошлось</h2>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Симптом</th>
+			<th>Где искать</th>
+		</tr>
+		<tr>
+			<td><code>Permission denied (publickey,password)</code></td>
+			<td>Ключа нет у этого пользователя на сервере: раздел 5, шаг 2</td>
+		</tr>
+		<tr>
+			<td><code>WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!</code></td>
+			<td>Сервер переустановили, и у него новый ключ. Если переустанавливали вы сами &mdash; удалите старую запись: <code>ssh-keygen -R 203.0.113.10</code> и подключитесь снова. Если нет &mdash; не подключайтесь и напишите провайдеру</td>
+		</tr>
+		<tr>
+			<td><code>The virtual environment was not created successfully because ensurepip is not available</code></td>
+			<td>Под <code>root</code>: <code>apt install python3.12-venv</code>, потом удалить <code>.venv</code> и создать заново</td>
+		</tr>
+		<tr>
+			<td><code>ModuleNotFoundError: No module named 'aiogram'</code></td>
+			<td>Окружение не активировано: <code>source .venv/bin/activate</code>, в приглашении должно быть <code>(.venv)</code></td>
+		</tr>
+		<tr>
+			<td><code>BOT_TOKEN не найден</code></td>
+			<td><code>.env</code> не приехал: проверьте <code>ls -a ~/habit_bot</code></td>
+		</tr>
+		<tr>
+			<td>На сервере пропали привычки</td>
+			<td>Бот запущен не из папки проекта и создал новую базу: раздел 8</td>
+		</tr>
+		<tr>
+			<td><code>TelegramConflictError: ... terminated by other getUpdates request</code></td>
+			<td>Запущена вторая копия бота, обычно дома: раздел 9</td>
+		</tr>
+		<tr>
+			<td>Бот перестал отвечать после закрытия терминала</td>
+			<td>Так и должно быть до урока 9.3: раздел 10</td>
+		</tr>
+	</tbody>
+</table>
+
+<details><summary>Как выглядит предупреждение о смене ключа сервера</summary>
+
+<pre><code>@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @
+@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!
+Someone could be eavesdropping on you right now (man-in-the-middle attack)!
+It is also possible that a host key has just been changed.
+The fingerprint for the ED25519 key sent by the remote host is
+SHA256:65SMY0s1MsuTksi2Hy4gLxBnu0CiuYHC6SnhKIPhfd4.
+Please contact your system administrator.
+Add correct host key in /home/anton/.ssh/known_hosts to get rid of this message.
+Offending ECDSA key in /home/anton/.ssh/known_hosts:3
+  remove with:
+  ssh-keygen -f '/home/anton/.ssh/known_hosts' -R '203.0.113.10'
+Host key for 203.0.113.10 has changed and you have requested strict checking.
+Host key verification failed.</code></pre>
+
+<p>Исправление &mdash; на вашем компьютере:</p>
+
+<pre><code>ssh-keygen -R 203.0.113.10</code></pre>
+
+<pre><code># Host 203.0.113.10 found: line 1
+# Host 203.0.113.10 found: line 2
+# Host 203.0.113.10 found: line 3
+/home/anton/.ssh/known_hosts updated.
+Original contents retained as /home/anton/.ssh/known_hosts.old</code></pre>
+
+<p>После этого <code>ssh</code> снова спросит про ключ сервера, как при первом входе.</p>
+</details>
+
+
+<!-- ═══ ШАГ 15 · text · новый шаг ═══ -->
+
+<h2>📋 Итог урока 9.2</h2>
+
+<p>ПривычкаБот работает на сервере, который не выключается. Привычки, отметки и города переехали вместе с базой, а часы бота показывают московское время, хотя сервер живёт по UTC.</p>
+
+<ul>
+	<li>✅ VPS &mdash; арендованный компьютер в дата-центре; управляют им по SSH</li>
+	<li>✅ Вход по ключу: закрытый остаётся у вас, открытый &mdash; в <code>authorized_keys</code> на сервере</li>
+	<li>✅ Бот работает под отдельным пользователем <code>bot</code>, а не под <code>root</code></li>
+	<li>✅ Переносим код, <code>requirements.txt</code>, <code>.env</code> и <code>habits.db</code>; окружение собираем заново</li>
+	<li>✅ <code>.env</code> едет через <code>scp</code> и никогда не попадает на GitHub</li>
+	<li>✅ Бот запускается из папки проекта, иначе создаст новую пустую базу</li>
+	<li>✅ Одна копия на токен: две вызывают <code>TelegramConflictError</code></li>
+	<li>✅ Бот, запущенный в терминале, умирает вместе с SSH-сессией</li>
+</ul>
+
+<h3>📝 Шпаргалка</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Где</th>
+			<th>Команда</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td>дома</td>
+			<td><code>ssh-keygen -t ed25519 -C "habit_bot"</code></td>
+			<td>Создать пару ключей</td>
+		</tr>
+		<tr>
+			<td>дома</td>
+			<td><code>ssh bot@IP</code></td>
+			<td>Войти на сервер</td>
+		</tr>
+		<tr>
+			<td>дома</td>
+			<td><code>tar -czf habit_bot.tar.gz --exclude=.venv --exclude=__pycache__ habit_bot</code></td>
+			<td>Упаковать проект без окружения</td>
+		</tr>
+		<tr>
+			<td>дома</td>
+			<td><code>scp habit_bot.tar.gz bot@IP:~</code></td>
+			<td>Отправить файл на сервер</td>
+		</tr>
+		<tr>
+			<td>сервер, root</td>
+			<td><code>apt update</code>, <code>apt upgrade -y</code></td>
+			<td>Обновить систему</td>
+		</tr>
+		<tr>
+			<td>сервер, root</td>
+			<td><code>adduser bot</code></td>
+			<td>Создать пользователя</td>
+		</tr>
+		<tr>
+			<td>сервер, root</td>
+			<td><code>apt install -y python3.12-venv</code></td>
+			<td>Модуль для создания окружений</td>
+		</tr>
+		<tr>
+			<td>сервер</td>
+			<td><code>tar -xzf habit_bot.tar.gz</code></td>
+			<td>Распаковать</td>
+		</tr>
+		<tr>
+			<td>сервер</td>
+			<td><code>python3 -m venv .venv</code>, <code>source .venv/bin/activate</code></td>
+			<td>Создать и активировать окружение</td>
+		</tr>
+		<tr>
+			<td>сервер</td>
+			<td><code>python -m pip install -r requirements.txt</code></td>
+			<td>Поставить библиотеки</td>
+		</tr>
+		<tr>
+			<td>сервер</td>
+			<td><code>pgrep -af 'python bot.py'</code></td>
+			<td>Проверить, запущен ли бот</td>
+		</tr>
+		<tr>
+			<td>сервер</td>
+			<td><code>exit</code></td>
+			<td>Выйти с сервера</td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>⚠️ Что пока остаётся учебным:</strong><br />
+Бот на сервере живёт, пока открыт терминал. Упадёт из-за ошибки &mdash; не поднимется. Перезагрузят сервер &mdash; не запустится. А обновлять код придётся тем же архивом и <code>scp</code>.</blockquote>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>Сервер есть, бот на нём запускается. Осталось, чтобы он запускался без нас: при старте сервера, после сбоя, без открытого терминала.</p>
+
+<p>В уроке 9.3 поручим это <code>systemd</code> &mdash; программе, которая в Ubuntu запускает все службы. Опишем бота одним файлом, и сервер будет держать его запущенным сам. А логи бота будем читать, не подключаясь к его терминалу.</p>

@@ -1,0 +1,1680 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 8.4. Практикум: погода в утреннем сообщении</h2>
+
+<p><strong>Аннотация:</strong><br />
+За три урока модуля мы собрали в папке <code>http_lab</code> всё, что нужно для погоды. В 8.1 &mdash; запрос через <code>aiohttp</code>. В 8.2 &mdash; разбор ответа и ваша <code>describe_weather()</code>. В 8.3 &mdash; таймаут и обработка отказов. Но ПривычкаБот об этом не знает: всё лежит в лаборатории.</p>
+
+<p>В практикуме перенесём погоду в проект. Бот научится запоминать город пользователя и собирать утреннее сообщение: погода и привычки на сегодня. Это то самое сообщение из плана курса, ради которого затевался модуль 8.</p>
+
+<p>Это практикум: сначала пробуйте написать очередную часть сами, потом открывайте решение и сверяйтесь.</p>
+
+<blockquote><strong>🛠 Бот работает после каждого раздела:</strong><br />
+Новые команды появляются по одной, старые не меняются. После каждого раздела бота можно запустить и проверить. Запросы уходят в настоящий Open-Meteo, поэтому нужен интернет.</blockquote>
+
+<blockquote><strong>🎯 Что сделаем:</strong><br />
+&bull; Соберём <code>weather.py</code> из функций уроков 8.2 и 8.3 &mdash; <strong>раздел 2</strong><br />
+&bull; Добавим в базу таблицу <code>users</code> с городом и координатами &mdash; <strong>раздел 3</strong><br />
+&bull; Напишем команду <code>/city Казань</code> &mdash; <strong>раздел 4</strong><br />
+&bull; Соберём утреннее сообщение в <code>build_morning_text()</code> &mdash; <strong>раздел 5</strong><br />
+&bull; Покажем его по команде <code>/morning</code> &mdash; <strong>раздел 6</strong><br />
+&bull; Проверим отказы: таймаут, город не задан, сервис недоступен, &mdash; <strong>раздел 7</strong></blockquote>
+
+<h2>🎯 1. Что должно получиться</h2>
+
+<p>У Ани две привычки: &laquo;Растяжка&raquo; и &laquo;Чтение&raquo;, и &laquo;Чтение&raquo; уже отмечено. Она сообщает боту свой город, а потом просит утреннее сообщение:</p>
+
+<pre><code>  Аня: /city Казань
+  Бот: Город сохранён: Казань
+       [состояние: None]
+  Аня: /morning
+  Бот: Доброе утро! Казань: +3, ясно.
+
+       Ваши привычки на сегодня:
+       ⬜ Растяжка
+       ✅ Чтение
+
+       Отметить &mdash; на экране /today
+       [состояние: None]</code></pre>
+<!-- АВТОР: все переписки урока получены на стенде &mdash; настоящий Dispatcher и роутеры проекта, ответы Open-Meteo записаны 01.11.2026; у ученика будет текущая погода -->
+
+<p>Город бот запомнил: в следующий раз <code>/morning</code> его не спросит. Галочки &mdash; те же, что на экране <code>/today</code>.</p>
+
+<p>Если сервис погоды не ответил, первая строка меняется, а остальное сообщение остаётся:</p>
+
+<pre><code>Доброе утро! Погоду узнать не удалось.
+
+Ваши привычки на сегодня:
+⬜ Растяжка
+✅ Чтение
+
+Отметить &mdash; на экране /today</code></pre>
+
+<blockquote><strong>📌 Как читать переписку:</strong><br />
+Как в модулях 6 и 7: строки в квадратных скобках &mdash; состояние FSM, в чате их не видно. Проверки этого урока мы проводили на стенде: настоящий <code>Dispatcher</code> и ваши роутеры, но без серверов Telegram. Ответы Open-Meteo &mdash; настоящие, записанные 1 ноября 2026 года. У вас погода будет другой.</blockquote>
+
+<h3>Почему &laquo;Казань: +3&raquo;, а не &laquo;В Казани +3&raquo;</h3>
+
+<p>&laquo;В Казани&raquo; звучит естественнее. Но название города пишет пользователь, а склонять его бот не умеет: из &laquo;Нижний Новгород&raquo; не получить &laquo;в Нижнем Новгороде&raquo; простой заменой окончания. Поэтому город стоит в начальной форме и отделён двоеточием &mdash; так он верен для любого названия.</p>
+
+<h3>Что меняется в проекте</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Файл</th>
+			<th>Было после 7.4</th>
+			<th>Станет</th>
+		</tr>
+		<tr>
+			<td><code>weather.py</code></td>
+			<td>&mdash;</td>
+			<td><strong>новый</strong>: <code>WEATHER_CODES</code>, <code>describe_weather()</code> из задачи 8.2, <code>find_city()</code>, <code>get_weather()</code> с таймаутом и обработкой отказов из 8.3</td>
+		</tr>
+		<tr>
+			<td><code>database.py</code></td>
+			<td>таблицы <code>habits</code> и <code>marks</code>, функции привычек и отметок</td>
+			<td>таблица <code>users</code> в <code>CREATE_TABLES</code>; добавятся <code>set_city()</code> и <code>get_city()</code></td>
+		</tr>
+		<tr>
+			<td><code>texts.py</code></td>
+			<td>тексты экранов, диалога и статистики</td>
+			<td>добавятся <code>CITY_USAGE</code>, <code>CITY_SAVED</code>, <code>CITY_NOT_FOUND</code>, <code>MORNING</code>, <code>WEATHER_LINE</code>, <code>NO_WEATHER</code>, <code>NO_CITY</code>; <code>/city</code> и <code>/morning</code> в <code>MENU</code> и <code>HELP</code></td>
+		</tr>
+		<tr>
+			<td><code>handlers/habits.py</code></td>
+			<td>экран <code>/today</code>, отметки, <code>/stats</code></td>
+			<td>добавятся <code>cmd_city()</code>, <code>build_morning_text()</code>, <code>cmd_morning()</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>📌 Что остаётся на месте:</strong><br />
+<code>bot.py</code>, <code>keyboards.py</code>, диалог создания привычки, <code>guard.py</code>, <code>common.py</code>, <code>fallback.py</code> и порядок роутеров не меняются. Новых роутеров не создаём: <code>/city</code> и <code>/morning</code> встанут в <code>habits.py</code> рядом с <code>/today</code> и <code>/stats</code>. Папка <code>http_lab</code> остаётся вне проекта: из неё мы только переносим код.</blockquote>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>🌤 2. weather.py: собираем погоду в одном файле</h2>
+
+<p>В <code>http_lab</code> погода разложена по двум файлам: <code>weather_parse.py</code> разбирает ответы, <code>weather_net.py</code> отправляет запросы. В проекте это будет один модуль <code>weather.py</code> &mdash; как <code>database.py</code> отвечает за базу, так он будет отвечать за погоду.</p>
+
+<p>Переносим не всё один в один. В 8.3 <code>get_weather(city)</code> делала два запроса подряд: по названию &mdash; координаты, по координатам &mdash; погоду. В проекте эти шаги разойдутся во времени. Город пользователь присылает один раз, командой <code>/city</code>, а погоду бот спрашивает каждое утро. Поэтому функций две:</p>
+
+<pre><code>find_city("Казань")                 &rarr;  ("Казань", 55.78874, 49.12214)  или None
+get_weather(55.78874, 49.12214)     &rarr;  "+3, ясно"                       или None</code></pre>
+
+<h3>✍️ Сначала сам</h3>
+
+<p><strong>Создайте в папке проекта, рядом с <code>database.py</code>, файл <code>weather.py</code>.</strong> Что в нём должно быть:</p>
+
+<ul>
+	<li>импорты <code>logging</code> и <code>aiohttp</code>, константы <code>GEO_URL</code>, <code>FORECAST_URL</code>, <code>TIMEOUT</code> и <code>logger</code> &mdash; из <code>weather_net.py</code>;</li>
+	<li>словарь <code>WEATHER_CODES</code> и ваша <code>describe_weather()</code> &mdash; из <code>weather_parse.py</code>, без изменений;</li>
+	<li><code>get_json()</code> из <code>weather_net.py</code>, без изменений;</li>
+	<li><code>parse_city()</code> из 8.2 с одним изменением: возвращать не только координаты, но и название места &mdash; <code>(name, latitude, longitude)</code>;</li>
+	<li><code>find_city(city)</code>: запрос к геокодеру, отказ сервиса &mdash; <code>None</code> и запись в лог, иначе результат <code>parse_city()</code>;</li>
+	<li><code>get_weather(latitude, longitude)</code>: запрос прогноза, отказ &mdash; <code>None</code> и запись в лог, иначе результат <code>describe_weather()</code>.</li>
+</ul>
+
+<p>Вопрос до спойлера: зачем <code>parse_city()</code> теперь возвращает название, если пользователь и так его написал?</p>
+
+<details><summary>Показать решение</summary>
+
+<pre><code class="language-python">"""Погода от Open-Meteo: запросы и разбор ответов."""
+import logging
+
+import aiohttp
+
+GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+logger = logging.getLogger(__name__)
+
+WEATHER_CODES = {
+    0: "ясно",
+    1: "в основном ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "ливень",
+    95: "гроза",
+}
+
+
+async def get_json(url: str, params: dict) -&gt; dict:
+    async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+        async with session.get(url, params=params) as response:
+            response.raise_for_status()
+            return await response.json()
+
+
+def parse_city(data: dict) -&gt; tuple[str, float, float] | None:
+    results = data.get("results")
+    if not results:
+        return None
+
+    place = results[0]
+    name = place.get("name")
+    latitude = place.get("latitude")
+    longitude = place.get("longitude")
+    if name is None or latitude is None or longitude is None:
+        return None
+    return name, latitude, longitude
+
+
+def describe_weather(data: dict) -&gt; str | None:
+    current = data.get("current")
+    if not current:
+        return None
+
+    temperature = current.get("temperature_2m")
+    code = current.get("weather_code")
+    if temperature is None or code is None:
+        return None
+
+    degrees = round(temperature)
+    if degrees == 0:
+        sign = "0"
+    else:
+        sign = f"{degrees:+d}"
+    text = WEATHER_CODES.get(code, "без описания")
+    return f"{sign}, {text}"
+
+
+async def find_city(city: str) -&gt; tuple[str, float, float] | None:
+    params = {"name": city, "count": 1, "language": "ru"}
+    try:
+        data = await get_json(GEO_URL, params)
+    except (aiohttp.ClientError, TimeoutError) as error:
+        name = type(error).__name__
+        logger.warning("Геокодер недоступен для %s: %s", city, name)
+        return None
+
+    place = parse_city(data)
+    if place is None:
+        logger.info("Город не найден: %s", city)
+    return place
+
+
+async def get_weather(latitude: float, longitude: float) -&gt; str | None:
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": "temperature_2m,weather_code",
+    }
+    try:
+        data = await get_json(FORECAST_URL, params)
+    except (aiohttp.ClientError, TimeoutError) as error:
+        name = type(error).__name__
+        logger.warning("Погода недоступна: %s", name)
+        return None
+
+    text = describe_weather(data)
+    if text is None:
+        logger.warning("Неожиданный ответ прогноза")
+    return text</code></pre>
+</details>
+
+<h3>Что здесь новое</h3>
+
+<p>Почти ничего: каждая часть файла уже работала в лаборатории. Разберём отличия.</p>
+
+<p><strong><code>parse_city()</code> возвращает название.</strong> Ответ на вопрос до спойлера: пользователь напишет город как получится, а геокодер вернёт его так, как он называется. В <code>/city</code> бот покажет и сохранит именно это название. Проверку <code>name is None</code> добавили по правилу урока 8.2: в чужом ответе может не оказаться любого ключа.</p>
+
+<p><strong><code>find_city()</code> и <code>get_weather()</code> устроены одинаково.</strong> Запрос в <code>try</code>, отказ сервиса &mdash; запись в лог и <code>None</code>, иначе &mdash; разбор ответа. Это форма <code>get_weather()</code> из урока 8.3, только каждая функция делает один запрос.</p>
+
+<p><strong>Отказ и &laquo;не нашлось&raquo; дают одно и то же <code>None</code>.</strong> Для геокодера &laquo;нет такого города&raquo; и &laquo;сервис не ответил&raquo; &mdash; разные события. Но пользователю мы скажем одно: проверьте название или попробуйте позже. А различать их будем по логу: <code>info</code> для ненайденного города, <code>warning</code> для отказа.</p>
+
+<p><strong>Лог в терминале бота.</strong> В <code>bot.py</code> логирование не настраивается. Тогда Python всё равно печатает в терминал записи уровня <code>warning</code> и выше, только без названия уровня. Записи <code>info</code> не печатаются. Для отказов сервиса этого достаточно: их мы увидим.</p>
+
+<h4>🔍 Проверка</h4>
+
+<p>Как <code>database.py</code> в уроке 7.2, проверим модуль из терминала, без бота. Откройте терминал в папке проекта с активным окружением:</p>
+
+<pre><code>python -c "import asyncio, weather; print(asyncio.run(weather.find_city('Казань')))"</code></pre>
+
+<pre><code>('Казань', 55.78874, 49.12214)</code></pre>
+
+<p>Координаты Казани &mdash; передадим их в прогноз:</p>
+
+<pre><code>python -c "import asyncio, weather; print(asyncio.run(weather.get_weather(55.78874, 49.12214)))"</code></pre>
+
+<pre><code>+3, ясно</code></pre>
+
+<p>И город, которого нет:</p>
+
+<pre><code>python -c "import asyncio, weather; print(asyncio.run(weather.find_city('Привычкоград')))"</code></pre>
+
+<pre><code>None</code></pre>
+
+<p>Запись <code>Город не найден</code> в лог ушла, но уровня <code>info</code>, поэтому в терминале её нет.</p>
+
+<blockquote><strong>❗ Если проверка не сошлась:</strong><br />
+<br />
+<strong><code>ModuleNotFoundError: No module named 'weather'</code></strong> &mdash; терминал открыт не в папке проекта или файл назван иначе.<br />
+<br />
+<strong><code>ModuleNotFoundError: No module named 'aiohttp'</code></strong> &mdash; не активировано окружение проекта. <code>aiohttp</code> стоит в нём вместе с aiogram (урок 8.1).<br />
+<br />
+<strong><code>None</code> для Казани</strong> &mdash; нет интернета, или <code>parse_city()</code> всё ещё возвращает два значения. Если в терминале строка <code>Геокодер недоступен</code>, дело в сети.<br />
+<br />
+<strong><code>NameError: name 'WEATHER_CODES' is not defined</code></strong> &mdash; словарь кодов не перенесён.</blockquote>
+
+
+<!-- ═══ ШАГ 3 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему в проекте <code>get_weather()</code> принимает координаты, а не название города, как в уроке 8.3?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Координаты бот узнаёт один раз, при <code>/city</code>, и хранит; утром остаётся один запрос вместо двух ✅</li>
+	<li>Сервис прогноза не принимает запросы с русскими буквами</li>
+	<li>Геокодер работает только днём, а утреннее сообщение уходит рано</li>
+	<li>Так быстрее разбирается ответ: числа проще строк</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Город меняется редко, а погода нужна каждое утро. Поэтому геокодер вызывается в <code>/city</code>, а прогноз &mdash; в утреннем сообщении.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Сколько запросов делала <code>get_weather(city)</code> в уроке 8.3? Какой из них даёт один и тот же результат каждое утро?</p>
+
+
+<!-- ═══ ШАГ 4 · text · новый шаг ═══ -->
+
+<h2>🗄 3. Таблица users: город и координаты</h2>
+
+<p>Боту нужно помнить город каждого пользователя. Привычки лежат в базе, и город туда же: новая таблица, по строке на пользователя.</p>
+
+<p>Что хранить? Название &mdash; чтобы показать его в сообщении. И координаты &mdash; чтобы не искать город каждое утро. Если хранить только название, утром боту пришлось бы снова спрашивать геокодер: два запроса вместо одного, и два шанса, что сервис не ответит.</p>
+
+<h3>Шаг 1. Таблица</h3>
+
+<p>Добавьте таблицу в строку <code>CREATE_TABLES</code> в <code>database.py</code>, после таблицы <code>marks</code>:</p>
+
+<pre><code class="language-python">CREATE TABLE IF NOT EXISTS users (
+    user_id   INTEGER PRIMARY KEY,
+    city      TEXT    NOT NULL,
+    latitude  REAL    NOT NULL,
+    longitude REAL    NOT NULL
+);</code></pre>
+
+<p>Новое здесь &mdash; два момента.</p>
+
+<p><strong><code>user_id INTEGER PRIMARY KEY</code></strong>. У таблиц <code>habits</code> и <code>marks</code> ключ &mdash; <code>id</code>, его выдаёт база. Здесь ключом служит сам номер пользователя: у одного пользователя один город. Две строки с одним <code>user_id</code> база не допустит.</p>
+
+<p><strong><code>REAL</code></strong> &mdash; дробное число. Координаты &mdash; дроби: <code>55.78874</code>.</p>
+
+<h3>Шаг 2. Таблица в уже существующей базе</h3>
+
+<p>У вас есть <code>habits.db</code> после урока 7.4, с привычками и отметками. Удалять его не нужно. Посмотрим, какие в нём таблицы. Остановите бота и выполните в папке проекта:</p>
+
+<pre><code>python -c "import sqlite3; db = sqlite3.connect('habits.db'); print(db.execute('SELECT name FROM sqlite_master WHERE type = ?', ('table',)).fetchall())"</code></pre>
+
+<p><code>sqlite_master</code> &mdash; служебная таблица, в которой SQLite хранит список всех таблиц. Значение подставлено через <code>?</code>, как в уроке 7.2. До изменений:</p>
+
+<pre><code>[('habits',), ('sqlite_sequence',), ('marks',)]</code></pre>
+
+<p><code>sqlite_sequence</code> SQLite завёл сам: в ней он помнит последний выданный номер для <code>AUTOINCREMENT</code>. Таблицы <code>users</code> нет.</p>
+
+<p>Запустите бота с новым <code>CREATE_TABLES</code>, остановите и выполните ту же команду:</p>
+
+<pre><code>[('habits',), ('sqlite_sequence',), ('marks',), ('users',)]</code></pre>
+
+<p><code>users</code> появилась. Её создала <code>init_db()</code> при запуске, как в уроке 7.4. <code>CREATE TABLE IF NOT EXISTS</code> пропустил <code>habits</code> и <code>marks</code> &mdash; они уже были &mdash; и создал недостающую. А привычки Ани на месте:</p>
+
+<pre><code>  Аня: /today
+  Бот: Мои привычки на сегодня
+       текущая дата
+
+       Выполнено: 1 из 2
+
+       [ ⬜ Растяжка ]
+       [ ✅ Чтение ]
+       [состояние: None]</code></pre>
+
+<p>Вот зачем в уроке 7.2 мы писали <code>IF NOT EXISTS</code>. Схема растёт вместе с ботом, а данные пользователей остаются.</p>
+
+<h3>✍️ Сначала сам: set_city() и get_city()</h3>
+
+<p><strong>Добавьте в конец <code>database.py</code> две функции:</strong></p>
+
+<ul>
+	<li><code>set_city(user_id, city, latitude, longitude)</code> &mdash; записать город пользователя;</li>
+	<li><code>get_city(user_id)</code> &mdash; вернуть словарь <code>{"city": ..., "latitude": ..., "longitude": ...}</code> или <code>None</code>, если города нет. Устроена как <code>get_habit()</code>.</li>
+</ul>
+
+<p>Вопрос до спойлера: что случится, если пользователь отправит <code>/city</code> второй раз, а <code>set_city()</code> делает обычный <code>INSERT</code>?</p>
+
+<details><summary>Показать решение</summary>
+
+<p>Сначала &mdash; <code>set_city()</code> с обычным <code>INSERT</code>, как <code>add_habit()</code>:</p>
+
+<pre><code class="language-python">async def set_city(
+    user_id: int, city: str, latitude: float, longitude: float
+) -&gt; None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, city, latitude, longitude) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, city, latitude, longitude),
+        )
+        await db.commit()</code></pre>
+
+<p>Проверим: запишем Ане Казань дважды. Первый раз:</p>
+
+<pre><code>python -c "import asyncio, database; asyncio.run(database.set_city(111, 'Казань', 55.78874, 49.12214)); print(asyncio.run(database.get_city(111)))"</code></pre>
+
+<pre><code>{'city': 'Казань', 'latitude': 55.78874, 'longitude': 49.12214}</code></pre>
+
+<p>Второй раз та же команда:</p>
+
+<pre><code>Traceback (most recent call last):
+  ...
+  File "database.py", line 171, in set_city
+    await db.execute(
+  ...
+sqlite3.IntegrityError: UNIQUE constraint failed: users.user_id</code></pre>
+
+<p>Строка с <code>user_id = 111</code> уже есть, а <code>user_id</code> &mdash; ключ. База отказалась вставлять вторую. В боте это значит: сменить город нельзя.</p>
+
+<p>Нужно &laquo;вставь, а если такой пользователь уже есть &mdash; обнови&raquo;. В SQLite это пишется так:</p>
+
+<pre><code>INSERT INTO users (user_id, city, latitude, longitude)
+VALUES (?, ?, ?, ?)
+ON CONFLICT (user_id) DO UPDATE SET
+    city = excluded.city,
+    latitude = excluded.latitude,
+    longitude = excluded.longitude</code></pre>
+
+<ul>
+	<li><code>ON CONFLICT (user_id)</code> &mdash; что делать, если строка с таким <code>user_id</code> уже есть;</li>
+	<li><code>DO UPDATE SET</code> &mdash; обновить её вместо вставки;</li>
+	<li><code>excluded.city</code> &mdash; значение, которое мы пытались вставить. <code>excluded</code> &mdash; &laquo;исключённая&raquo; строка, та, что не прошла из-за конфликта.</li>
+</ul>
+
+<p>Итоговая <code>set_city()</code>:</p>
+
+<pre><code class="language-python">async def set_city(
+    user_id: int, city: str, latitude: float, longitude: float
+) -&gt; None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, city, latitude, longitude) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (user_id) DO UPDATE SET "
+            "city = excluded.city, "
+            "latitude = excluded.latitude, "
+            "longitude = excluded.longitude",
+            (user_id, city, latitude, longitude),
+        )
+        await db.commit()</code></pre>
+
+<p>И <code>get_city()</code>:</p>
+
+<pre><code class="language-python">async def get_city(user_id: int) -&gt; dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT city, latitude, longitude FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return dict(row)</code></pre>
+</details>
+
+<h3>Что здесь новое</h3>
+
+<p>Ответ на вопрос до спойлера вы видели: <code>IntegrityError</code>. Обычный <code>INSERT</code> годится, когда каждая запись новая: привычка, отметка. Для настройки, которая у пользователя одна, нужен <code>INSERT ... ON CONFLICT DO UPDATE</code>. Такую запись часто называют upsert: от update и insert.</p>
+
+<p><code>get_city()</code> ничего нового не содержит: <code>row_factory</code>, <code>fetchone()</code> и <code>None</code> для пустого результата &mdash; как в <code>get_habit()</code> из урока 7.2.</p>
+
+<h4>🔍 Проверка</h4>
+
+<p>С новой <code>set_city()</code> повторите первую команду, а затем вторую, с Москвой:</p>
+
+<pre><code>python -c "import asyncio, database; asyncio.run(database.set_city(111, 'Казань', 55.78874, 49.12214)); print(asyncio.run(database.get_city(111)))"</code></pre>
+
+<pre><code>{'city': 'Казань', 'latitude': 55.78874, 'longitude': 49.12214}</code></pre>
+
+<pre><code>python -c "import asyncio, database; asyncio.run(database.set_city(111, 'Москва', 55.75204, 37.61781)); print(asyncio.run(database.get_city(111)))"</code></pre>
+
+<pre><code>{'city': 'Москва', 'latitude': 55.75204, 'longitude': 37.61781}</code></pre>
+
+<p>Город сменился. Посмотрим, сколько строк в таблице:</p>
+
+<pre><code>python -c "import sqlite3; db = sqlite3.connect('habits.db'); print(db.execute('SELECT * FROM users').fetchall())"</code></pre>
+
+<pre><code>[(111, 'Москва', 55.75204, 37.61781)]</code></pre>
+
+<p>Одна: вторая команда обновила строку, а не добавила новую. А у Бориса, который города не задавал:</p>
+
+<pre><code>python -c "import asyncio, database; print(asyncio.run(database.get_city(222)))"</code></pre>
+
+<pre><code>None</code></pre>
+
+<p>Перед следующим разделом очистите таблицу от проверочной строки:</p>
+
+<pre><code>python -c "import sqlite3; db = sqlite3.connect('habits.db'); db.execute('DELETE FROM users'); db.commit()"</code></pre>
+
+<blockquote><strong>❗ Если проверка не сошлась:</strong><br />
+<br />
+<strong><code>sqlite3.OperationalError: no such table: users</code></strong> &mdash; таблицы нет в <code>CREATE_TABLES</code>, или бота не запускали после изменения: таблицу создаёт <code>init_db()</code> при старте.<br />
+<br />
+<strong><code>sqlite3.IntegrityError: UNIQUE constraint failed: users.user_id</code></strong> &mdash; в <code>set_city()</code> нет <code>ON CONFLICT</code>.<br />
+<br />
+<strong><code>sqlite3.OperationalError: near "ON": syntax error</code></strong> &mdash; потерян пробел на стыке строк запроса: <code>"VALUES (?, ?, ?, ?)"</code> и <code>"ON CONFLICT"</code> склеились без пробела.</blockquote>
+
+
+<!-- ═══ ШАГ 5 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Аня отправила <code>/city Казань</code>, а через неделю &mdash; <code>/city Москва</code>. <code>set_city()</code> использует <code>ON CONFLICT (user_id) DO UPDATE</code>. Что будет в таблице <code>users</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Одна строка Ани с Москвой и координатами Москвы ✅</li>
+	<li>Две строки Ани: с Казанью и с Москвой</li>
+	<li>Одна строка Ани с Казанью: вторая запись отклонена</li>
+	<li>Одна строка с Москвой, но с координатами Казани</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Конфликт по <code>user_id</code> превращает вставку в обновление, и <code>excluded</code> подставляет все три новых значения.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните проверку в разделе 3: сколько строк показал <code>SELECT * FROM users</code> после двух вызовов? Какие поля перечислены после <code>DO UPDATE SET</code>?</p>
+
+
+<!-- ═══ ШАГ 6 · text · новый шаг ═══ -->
+
+<h2>🏙 4. Команда /city Казань</h2>
+
+<p>У команды <code>/city</code> есть то, чего не было ни у одной команды бота: продолжение. Город пишут в той же строке, после пробела: <code>/city Казань</code>. Как хэндлеру получить эту часть?</p>
+
+<h3>CommandObject: команда по частям</h3>
+
+<p>Фильтр <code>Command("city")</code> не только проверяет, что сообщение начинается с <code>/city</code>. Он разбирает его на части и кладёт результат в объект <code>CommandObject</code>. Чтобы получить его в хэндлере, добавьте параметр с именем <code>command</code>:</p>
+
+<pre><code>async def cmd_city(message: Message, command: CommandObject) -&gt; None:</code></pre>
+
+<p>Так же aiogram передаёт <code>state</code> в хэндлеры диалога (модуль 6): видит параметр с известным именем и подставляет значение. И правило то же: параметр должен называться именно <code>command</code>. Назовёте иначе &mdash; бот не ответит, а в терминале будет <code>TypeError: ... missing 1 required positional argument</code>, как с <code>ctx</code> вместо <code>state</code>.</p>
+
+<p>Текст после команды лежит в <code>command.args</code>. Мы проверили, что там оказывается:</p>
+
+<pre><code>/city                         &rarr;  command.args = None
+/city Казань                  &rarr;  command.args = "Казань"
+/city   Нижний Новгород       &rarr;  command.args = "Нижний Новгород"
+/city Казань   (с пробелами)  &rarr;  command.args = "Казань   "</code></pre>
+
+<p>Без города &mdash; <code>None</code>, а не пустая строка. Пробелы слева aiogram убирает, справа оставляет. Поэтому дальше: проверка на пустоту и <code>.strip()</code>.</p>
+
+<h3>Тексты</h3>
+
+<p>Добавьте в конец <code>texts.py</code>:</p>
+
+<pre><code class="language-python">CITY_USAGE = (
+    "Напишите город после команды, например:\n"
+    "/city Казань"
+)
+CITY_SAVED = "Город сохранён: {city}"
+CITY_NOT_FOUND = (
+    "Не удалось найти город &laquo;{city}&raquo;.\n"
+    "Проверьте название или попробуйте позже."
+)</code></pre>
+
+<p>В <code>CITY_NOT_FOUND</code> &mdash; обе причины из раздела 2: города нет или сервис не ответил. Текст честен в обоих случаях.</p>
+
+<p>И строки команд в <code>MENU</code> и <code>HELP</code>, после <code>/stats</code>:</p>
+
+<pre><code class="language-python">    "/stats &mdash; статистика\n"
+    "/morning &mdash; утреннее сообщение\n"
+    "/city &mdash; город для погоды\n"
+    "/help &mdash; справка"</code></pre>
+
+<pre><code class="language-python">    "/stats &mdash; статистика\n"
+    "/morning &mdash; утреннее сообщение\n"
+    "/city &mdash; город для погоды, например /city Казань\n"
+    "/help &mdash; эта справка"</code></pre>
+
+<p>Строку <code>/morning</code> добавляем сразу, команда появится в разделе 6.</p>
+
+<h3>✍️ Сначала сам</h3>
+
+<p><strong>Откройте <code>handlers/habits.py</code>.</strong> Что нужно сделать:</p>
+
+<ul>
+	<li>импортировать <code>CommandObject</code> из <code>aiogram.filters</code> рядом с <code>Command</code>, и модуль <code>weather</code> рядом с <code>database</code>;</li>
+	<li>написать <code>cmd_city(message, command)</code> перед хэндлерами нажатий;</li>
+	<li>нет города после команды &mdash; ответить <code>CITY_USAGE</code>;</li>
+	<li>найти город через <code>weather.find_city()</code>; не нашёлся &mdash; <code>CITY_NOT_FOUND</code> с тем, что написал пользователь;</li>
+	<li>нашёлся &mdash; сохранить через <code>database.set_city()</code> и ответить <code>CITY_SAVED</code> с названием от геокодера.</li>
+</ul>
+
+<p>Вопрос до спойлера: какие строки в ответах нужно пропустить через <code>html.quote()</code>?</p>
+
+<details><summary>Показать решение</summary>
+
+<p>Импорты в начале файла:</p>
+
+<pre><code class="language-python">from aiogram.filters import Command, CommandObject
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+
+import database
+import keyboards
+import texts
+import weather
+from streak import count_streak</code></pre>
+
+<p>Хэндлер &mdash; перед <code>switch_page()</code>:</p>
+
+<pre><code class="language-python">@router.message(Command("city"))
+async def cmd_city(message: Message, command: CommandObject) -&gt; None:
+    if not command.args:
+        await message.answer(texts.CITY_USAGE)
+        return
+
+    query = command.args.strip()
+    place = await weather.find_city(query)
+    if place is None:
+        await message.answer(
+            texts.CITY_NOT_FOUND.format(city=html.quote(query))
+        )
+        return
+
+    city, latitude, longitude = place
+    await database.set_city(message.from_user.id, city, latitude, longitude)
+    await message.answer(texts.CITY_SAVED.format(city=html.quote(city)))</code></pre>
+</details>
+
+<h3>Что здесь новое</h3>
+
+<p><code>CommandObject</code> &mdash; разобрали выше. Остальное собрано из знакомых частей: ранний <code>return</code> на каждую ошибку, как в шагах диалога урока 6.3, и распаковка кортежа из <code>find_city()</code>.</p>
+
+<p>Ответ на вопрос до спойлера: обе. <code>query</code> написал пользователь, и в нём может оказаться <code>&lt;</code> &mdash; урок 4.5. Название <code>city</code> прислал чужой сервис &mdash; урок 8.2 научил ему не доверять. Бот отправляет сообщения в режиме HTML, и любой текст со стороны проходит через <code>html.quote()</code>.</p>
+
+<p>Номер пользователя для <code>set_city()</code> &mdash; из <code>message.from_user.id</code>, по правилу урока 7.4.</p>
+
+<h4>🔍 Проверка</h4>
+
+<p>Запустите бота и отправьте команду без города, с несуществующим городом и с настоящим. Пусть и Борис задаст свой:</p>
+
+<pre><code>  Аня: /city
+  Бот: Напишите город после команды, например:
+       /city Казань
+       [состояние: None]
+  Аня: /city Привычкоград
+  Бот: Не удалось найти город &laquo;Привычкоград&raquo;.
+       Проверьте название или попробуйте позже.
+       [состояние: None]
+  Аня: /city Казань
+  Бот: Город сохранён: Казань
+       [состояние: None]
+  Борис: /city Москва
+  Бот: Город сохранён: Москва
+       [состояние: None]</code></pre>
+
+<p>Посреди диалога создания привычки <code>/city</code>, как любая команда, не сработает &mdash; это <code>guard.py</code> из урока 6.4:</p>
+
+<pre><code>  Аня: /add
+  Бот: Как назовём привычку?
+
+       [ ✖️ Отмена ]
+       [состояние: AddHabit:waiting_for_name]
+  Аня: /city Москва
+  Бот: Сейчас идёт создание привычки.
+       Ответьте на вопрос выше или отмените его: /cancel
+       [состояние: AddHabit:waiting_for_name]
+  Аня: /cancel
+  Бот: Создание привычки отменено.
+       [состояние: None]</code></pre>
+
+<blockquote><strong>❗ Если проверка не сошлась:</strong><br />
+<br />
+<strong>Бот не отвечает, в терминале <code>TypeError: cmd_city() missing 1 required positional argument: 'args'</code></strong> &mdash; параметр назван не <code>command</code>. aiogram подставляет <code>CommandObject</code> только по этому имени.<br />
+<br />
+<strong>На <code>/city</code> без города <code>AttributeError: 'NoneType' object has no attribute 'strip'</code></strong> &mdash; нет проверки <code>if not command.args</code>.<br />
+<br />
+<strong><code>NameError: name 'weather' is not defined</code></strong> &mdash; нет <code>import weather</code>.<br />
+<br />
+<strong>&laquo;Такой команды нет&raquo;</strong> &mdash; хэндлер не в <code>habits.py</code>, или бот не перезапущен после изменений.</blockquote>
+
+
+<!-- ═══ ШАГ 7 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Пользователь отправил <code>/city</code> и больше ничего. Что лежит в <code>command.args</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li><code>None</code> ✅</li>
+	<li>Пустая строка <code>""</code></li>
+	<li>Строка <code>"/city"</code></li>
+	<li>Ничего: хэндлер с <code>CommandObject</code> не вызывается для команды без продолжения</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Поэтому проверка <code>if not command.args</code> стоит до <code>.strip()</code>: у <code>None</code> такого метода нет.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите на таблицу в начале раздела 4. И на первую строку переписки: какой ответ получила Аня на <code>/city</code> без города?</p>
+
+
+<!-- ═══ ШАГ 8 · text · новый шаг ═══ -->
+
+<h2>☀️ 5. build_morning_text(): утреннее сообщение</h2>
+
+<p>Город есть, погода есть, привычки есть. Соберём из них текст. Сделаем это отдельной функцией, а не внутри хэндлера, и вот почему.</p>
+
+<p>Сейчас сообщение будет приходить в ответ на команду. А в модуле 9 бот начнёт присылать его сам, по времени. Отправлять будет цикл напоминаний &mdash; и у него нет <code>message</code>: никто ничего не писал. Есть только номер пользователя и сегодняшняя дата. Значит, функция должна обходиться ими:</p>
+
+<pre><code>build_morning_text(user_id, day)  &rarr;  готовый текст сообщения</code></pre>
+
+<p>Так же в уроке 5.3 мы вынесли <code>build_today_screen()</code>: экран собирает одна функция, а вызывают её разные хэндлеры.</p>
+
+<h3>Тексты</h3>
+
+<p>Добавьте в конец <code>texts.py</code>:</p>
+
+<pre><code class="language-python">MORNING = (
+    "Доброе утро! {weather}\n\n"
+    "&lt;b&gt;Ваши привычки на сегодня:&lt;/b&gt;\n"
+    "{habits}\n\n"
+    "Отметить &mdash; на экране /today"
+)
+WEATHER_LINE = "{city}: {weather}."
+NO_WEATHER = "Погоду узнать не удалось."
+NO_CITY = "Город для погоды не задан: /city Казань"</code></pre>
+
+<p><code>MORNING</code> &mdash; рамка сообщения: в <code>{weather}</code> встанет одна из трёх строк, в <code>{habits}</code> &mdash; список. <code>WEATHER_LINE</code> &mdash; когда погода есть, <code>NO_WEATHER</code> &mdash; когда сервис не ответил, <code>NO_CITY</code> &mdash; когда город не задан.</p>
+
+<h3>✍️ Сначала сам</h3>
+
+<p><strong>Напишите в <code>handlers/habits.py</code>, после <code>cmd_city()</code>, функцию <code>build_morning_text(user_id, day)</code>:</strong></p>
+
+<ul>
+	<li>получить город через <code>database.get_city()</code>; нет города &mdash; строка погоды <code>NO_CITY</code>;</li>
+	<li>есть &mdash; спросить <code>weather.get_weather()</code> по координатам; <code>None</code> &mdash; <code>NO_WEATHER</code>, иначе <code>WEATHER_LINE</code>;</li>
+	<li>получить привычки и отметки: <code>get_habits()</code> и <code>get_done_ids()</code> из урока 7.4;</li>
+	<li>нет привычек &mdash; вместо списка <code>EMPTY_TODAY</code>; есть &mdash; по строке на привычку: ✅ или ⬜ и название;</li>
+	<li>вернуть <code>MORNING</code> с подставленными строками.</li>
+</ul>
+
+<p>Вопрос до спойлера: почему ответ <code>get_weather()</code> нельзя положить в переменную <code>weather</code>?</p>
+
+<details><summary>Показать решение</summary>
+
+<pre><code class="language-python">async def build_morning_text(user_id: int, day: date) -&gt; str:
+    place = await database.get_city(user_id)
+    if place is None:
+        weather_line = texts.NO_CITY
+    else:
+        forecast = await weather.get_weather(
+            place["latitude"], place["longitude"]
+        )
+        if forecast is None:
+            weather_line = texts.NO_WEATHER
+        else:
+            weather_line = texts.WEATHER_LINE.format(
+                city=html.quote(place["city"]),
+                weather=forecast,
+            )
+
+    habits = await database.get_habits(user_id)
+    done_ids = await database.get_done_ids(user_id, day)
+    if not habits:
+        habits_text = texts.EMPTY_TODAY
+    else:
+        lines = []
+        for habit in habits:
+            mark = "✅" if habit["id"] in done_ids else "⬜"
+            lines.append(f"{mark} {html.quote(habit['name'])}")
+        habits_text = "\n".join(lines)
+
+    return texts.MORNING.format(weather=weather_line, habits=habits_text)</code></pre>
+</details>
+
+<h3>Что здесь новое</h3>
+
+<p><strong>Ни одной новой функции базы.</strong> <code>get_habits()</code> и <code>get_done_ids()</code> &mdash; те же, что собирают экран <code>/today</code> в уроке 7.4. Поэтому галочки в утреннем сообщении всегда совпадают с экраном: данные одни. Отметка ✅ ставится тем же выражением, что на кнопках в <code>keyboards.py</code>.</p>
+
+<p><strong>Три исхода погоды &mdash; три строки.</strong> Как в наброске <code>morning_demo.py</code> из урока 8.3: <code>None</code> не роняет сообщение, а меняет одну строку. Привычки собираются в любом случае.</p>
+
+<p><strong>Ответ на вопрос до спойлера.</strong> <code>weather</code> &mdash; имя модуля, который мы импортировали. Если в функции где-то есть присваивание <code>weather = ...</code>, Python считает <code>weather</code> локальной переменной во <strong>всей</strong> функции. Тогда строка <code>weather = await weather.get_weather(...)</code> обращается к ещё не созданной переменной. Мы проверили:</p>
+
+<pre><code>UnboundLocalError: cannot access local variable 'weather' where it is not associated with a value</code></pre>
+
+<p>Поэтому ответ лежит в <code>forecast</code>, а строка для сообщения &mdash; в <code>weather_line</code>.</p>
+
+<p><strong><code>html.quote()</code></strong> &mdash; для названия города и привычек: оба пришли со стороны.</p>
+
+<h2>📨 6. Команда /morning</h2>
+
+<p>Функция готова, осталось её показать. Пока бот не умеет присылать сообщение сам, <code>/morning</code> будет предпросмотром: каким сообщение придёт утром.</p>
+
+<p>Добавьте хэндлер после <code>build_morning_text()</code>:</p>
+
+<pre><code class="language-python">@router.message(Command("morning"))
+async def cmd_morning(message: Message) -&gt; None:
+    text = await build_morning_text(message.from_user.id, date.today())
+    await message.answer(text)</code></pre>
+
+<p>Хэндлер в одну строку: взять номер и дату, получить текст, отправить. Вся работа &mdash; в <code>build_morning_text()</code>.</p>
+
+<h4>🔍 Проверка</h4>
+
+<p>Перезапустите бота. Аня и Борис задали города в разделе 4. У Ани две привычки, у Бориса &mdash; ни одной:</p>
+
+<pre><code>  Аня: /morning
+  Бот: Доброе утро! Казань: +3, ясно.
+
+       Ваши привычки на сегодня:
+       ⬜ Растяжка
+       ✅ Чтение
+
+       Отметить &mdash; на экране /today
+       [состояние: None]
+  Борис: /morning
+  Бот: Доброе утро! Москва: +3, в основном ясно.
+
+       Ваши привычки на сегодня:
+       У вас пока нет привычек.
+       Добавьте первую командой /add
+
+       Отметить &mdash; на экране /today
+       [состояние: None]</code></pre>
+<!-- АВТОР: если ученик очистил users в разделе 3 и не выполнял /city &mdash; у него будет NO_CITY; переписка здесь продолжает проверку раздела 4 -->
+
+<p>У Бориса своя погода и честное &laquo;пока нет привычек&raquo;. Теперь Аня отмечает &laquo;Растяжку&raquo; на экране <code>/today</code> и снова просит утреннее сообщение:</p>
+
+<pre><code>  Аня: /morning
+  Бот: Доброе утро! Казань: +3, ясно.
+
+       Ваши привычки на сегодня:
+       ✅ Растяжка
+       ✅ Чтение
+
+       Отметить &mdash; на экране /today
+       [состояние: None]</code></pre>
+
+<p>Галочка появилась и здесь. И команда видна в меню:</p>
+
+<pre><code>  Аня: /menu
+  Бот: Главное меню
+
+       /today &mdash; привычки на сегодня
+       /add &mdash; добавить привычку
+       /list &mdash; мои привычки
+       /stats &mdash; статистика
+       /morning &mdash; утреннее сообщение
+       /city &mdash; город для погоды
+       /help &mdash; справка
+       [состояние: None]</code></pre>
+
+<blockquote><strong>❗ Если проверка не сошлась:</strong><br />
+<br />
+<strong>Вместо погоды <code>Казань: &lt;coroutine object get_weather at 0x…&gt;.</code></strong> &mdash; перед <code>weather.get_weather()</code> пропущен <code>await</code>. В терминале &mdash; <code>coroutine 'get_weather' was never awaited</code>.<br />
+<br />
+<strong>Бот не отвечает, в терминале <code>TypeError: 'coroutine' object is not subscriptable</code></strong> &mdash; пропущен <code>await</code> перед <code>database.get_city()</code>.<br />
+<br />
+<strong><code>UnboundLocalError: cannot access local variable 'weather'</code></strong> &mdash; ответ погоды положен в переменную <code>weather</code>.<br />
+<br />
+<strong>Галочки не совпадают с <code>/today</code></strong> &mdash; в <code>get_done_ids()</code> передана не та дата или не тот пользователь.</blockquote>
+
+
+<!-- ═══ ШАГ 9 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему <code>build_morning_text()</code> принимает <code>user_id</code> и <code>day</code>, а не <code>message</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>В модуле 9 её будет вызывать цикл напоминаний, у которого нет сообщения от пользователя ✅</li>
+	<li>Из <code>message</code> нельзя получить номер пользователя</li>
+	<li>aiogram запрещает передавать <code>message</code> в обычные функции</li>
+	<li>Так функция работает быстрее: меньше аргументов</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Утром сообщение отправит не хэндлер, а бот сам, по времени. Ему понадобится собрать тот же текст, имея только номер пользователя и дату.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Перечитайте начало раздела 5. Кто будет отправлять утреннее сообщение в модуле 9 и что у него будет в руках?</p>
+
+
+<!-- ═══ ШАГ 10 · text · новый шаг ═══ -->
+
+<h2>🧯 7. Проверяем отказы</h2>
+
+<p>Утреннее сообщение работает, когда всё хорошо. Проверим, что оно работает, когда плохо. Способ &mdash; из урока 8.3: устроить отказ, поменяв одну константу. Только теперь меняем её в <code>weather.py</code> проекта и смотрим на бота.</p>
+
+<h3>1. Сервис не успел ответить</h3>
+
+<p>Замените в <code>weather.py</code> строку таймаута:</p>
+
+<pre><code class="language-python">TIMEOUT = aiohttp.ClientTimeout(total=0.001)</code></pre>
+
+<p>Перезапустите бота: модули читаются при запуске. Аня просит утреннее сообщение, а потом пробует сменить город:</p>
+
+<pre><code>  Аня: /morning
+  Бот: Доброе утро! Погоду узнать не удалось.
+
+       Ваши привычки на сегодня:
+       ✅ Растяжка
+       ✅ Чтение
+
+       Отметить &mdash; на экране /today
+       [состояние: None]
+  Аня: /city Москва
+  Бот: Не удалось найти город &laquo;Москва&raquo;.
+       Проверьте название или попробуйте позже.
+       [состояние: None]</code></pre>
+
+<p>В терминале бота:</p>
+
+<pre><code>Погода недоступна: TimeoutError
+Геокодер недоступен для Москва: TimeoutError</code></pre>
+
+<p>Сообщение пришло, вместо погоды &mdash; заглушка, привычки на месте. <code>/city</code> честно попросил попробовать позже, и город не изменился: <code>set_city()</code> не вызывалась. В терминале &mdash; две записи с причиной.</p>
+
+<p><strong>Верните строку таймаута:</strong></p>
+
+<pre><code class="language-python">TIMEOUT = aiohttp.ClientTimeout(total=5)</code></pre>
+
+<h3>2. Сервис недоступен</h3>
+
+<p>Поменяйте адрес прогноза на несуществующий, как в уроке 8.3:</p>
+
+<pre><code class="language-python">FORECAST_URL = "https://api.open-meteo.invalid/v1/forecast"</code></pre>
+
+<p>Перезапустите бота:</p>
+
+<pre><code>  Аня: /morning
+  Бот: Доброе утро! Погоду узнать не удалось.
+
+       Ваши привычки на сегодня:
+       ✅ Растяжка
+       ✅ Чтение
+
+       Отметить &mdash; на экране /today
+       [состояние: None]</code></pre>
+
+<pre><code>Погода недоступна: ClientConnectorDNSError</code></pre>
+
+<p>Та же заглушка, другая причина в терминале. Пользователю разница не важна, нам &mdash; да.</p>
+
+<p><strong>Верните адрес:</strong></p>
+
+<pre><code class="language-python">FORECAST_URL = "https://api.open-meteo.com/v1/forecast"</code></pre>
+
+<h3>3. Город не задан</h3>
+
+<p>Это не отказ, а новый пользователь. Мы проверили на чистой базе: пользователь создал привычку, а <code>/city</code> не отправлял:</p>
+
+<pre><code>  Аня: /morning
+  Бот: Доброе утро! Город для погоды не задан: /city Казань
+
+       Ваши привычки на сегодня:
+       ⬜ Растяжка
+
+       Отметить &mdash; на экране /today
+       [состояние: None]</code></pre>
+
+<p>Строка погоды подсказывает, что сделать. Остальное &mdash; как обычно.</p>
+
+<h3>Чек-лист</h3>
+
+<ul>
+	<li><code>/city</code> без города &mdash; подсказка с примером</li>
+	<li><code>/city</code> с несуществующим городом &mdash; &laquo;Не удалось найти город&raquo;, в базе ничего не меняется</li>
+	<li><code>/city Казань</code> &mdash; &laquo;Город сохранён: Казань&raquo;; повторный <code>/city</code> меняет город, а не добавляет второй</li>
+	<li><code>/morning</code> &mdash; погода и привычки с теми же галочками, что на <code>/today</code></li>
+	<li>Без города &mdash; подсказка <code>/city</code> вместо погоды</li>
+	<li>Сервис не ответил &mdash; &laquo;Погоду узнать не удалось&raquo;, привычки на месте, причина в терминале</li>
+	<li>У Ани и Бориса свои города</li>
+	<li>Привычки и отметки из урока 7.4 на месте после добавления таблицы <code>users</code></li>
+	<li><code>TIMEOUT</code> и <code>FORECAST_URL</code> в <code>weather.py</code> возвращены</li>
+</ul>
+
+
+<!-- ═══ ШАГ 11 · text · новый шаг ═══ -->
+
+<h2>🔧 8. Если что-то не сошлось</h2>
+
+<p>Каждый симптом мы получили на стенде, сломав готовый проект в одном месте.</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Симптом</th>
+			<th>Где искать</th>
+		</tr>
+		<tr>
+			<td><code>OperationalError: no such table: users</code></td>
+			<td>Таблицы нет в <code>CREATE_TABLES</code>, или бот не перезапущен после изменения</td>
+		</tr>
+		<tr>
+			<td>Второй <code>/city</code>: <code>IntegrityError: UNIQUE constraint failed: users.user_id</code></td>
+			<td>В <code>set_city()</code> нет <code>ON CONFLICT (user_id) DO UPDATE</code></td>
+		</tr>
+		<tr>
+			<td><code>TypeError: cmd_city() missing 1 required positional argument: 'args'</code></td>
+			<td>Параметр с <code>CommandObject</code> должен называться <code>command</code></td>
+		</tr>
+		<tr>
+			<td><code>/city</code> без города: <code>AttributeError: 'NoneType' object has no attribute 'strip'</code></td>
+			<td>Нет проверки <code>if not command.args</code> перед <code>.strip()</code></td>
+		</tr>
+		<tr>
+			<td><code>NameError: name 'weather' is not defined</code></td>
+			<td>Нет <code>import weather</code> в <code>handlers/habits.py</code></td>
+		</tr>
+		<tr>
+			<td><code>/morning</code>: <code>TypeError: 'coroutine' object is not subscriptable</code></td>
+			<td>Пропущен <code>await</code> перед <code>database.get_city()</code></td>
+		</tr>
+		<tr>
+			<td>В сообщении <code>&lt;coroutine object get_weather at 0x…&gt;</code></td>
+			<td>Пропущен <code>await</code> перед <code>weather.get_weather()</code></td>
+		</tr>
+		<tr>
+			<td><code>UnboundLocalError: cannot access local variable 'weather'</code></td>
+			<td>Переменная в <code>build_morning_text()</code> названа так же, как модуль</td>
+		</tr>
+		<tr>
+			<td>Всегда &laquo;Не удалось найти город&raquo;, в терминале <code>Геокодер недоступен</code></td>
+			<td>Нет интернета, или в <code>GEO_URL</code> опечатка</td>
+		</tr>
+		<tr>
+			<td>Всегда &laquo;Погоду узнать не удалось&raquo;, в терминале <code>TimeoutError</code></td>
+			<td>Не возвращён <code>TIMEOUT = aiohttp.ClientTimeout(total=5)</code> после проверки раздела 7</td>
+		</tr>
+		<tr>
+			<td>Всегда &laquo;Погоду узнать не удалось&raquo;, в терминале <code>Неожиданный ответ прогноза</code></td>
+			<td>В <code>params</code> у <code>get_weather()</code> опечатка в <code>"current"</code>, или <code>describe_weather()</code> перенесена с ошибкой</td>
+		</tr>
+	</tbody>
+</table>
+
+
+<!-- ═══ ШАГ 12 · text · новый шаг ═══ -->
+
+<h2>📋 Итог практикума</h2>
+
+<p>В начале урока погода жила в лаборатории. Теперь ПривычкаБот помнит город каждого пользователя и собирает утреннее сообщение: погода, привычки, галочки. А если сервис не отвечает, сообщение всё равно приходит.</p>
+
+<ul>
+	<li>✅ <code>weather.py</code> собран из уроков 8.2 и 8.3: разбор, таймаут, обработка отказов</li>
+	<li>✅ Геокодер вызывается один раз, в <code>/city</code>; утром &mdash; один запрос прогноза по сохранённым координатам</li>
+	<li>✅ Таблица <code>users</code> добавлена в существующую базу без потери привычек &mdash; благодаря <code>IF NOT EXISTS</code></li>
+	<li>✅ <code>ON CONFLICT DO UPDATE</code>: у пользователя один город, повторный <code>/city</code> его меняет</li>
+	<li>✅ <code>CommandObject</code> отдаёт текст после команды: <code>command.args</code></li>
+	<li>✅ <code>build_morning_text(user_id, day)</code> не зависит от сообщения &mdash; её вызовет цикл напоминаний в модуле 9</li>
+	<li>✅ Отказ сервиса меняет одну строку сообщения, а не роняет его</li>
+</ul>
+
+<h3>Что использовали из прошлых уроков</h3>
+
+<pre><code>4.5  &rarr;  html.quote(), тексты в texts.py
+5.3  &rarr;  функция, собирающая экран, отдельно от хэндлера
+6.3  &rarr;  ранний return на каждую ошибку ввода
+6.4  &rarr;  guard.py не пускает команды в диалог
+7.2  &rarr;  CREATE TABLE IF NOT EXISTS, ?, row_factory, fetchone()
+7.4  &rarr;  init_db() при запуске, get_habits(), get_done_ids(), from_user.id
+8.2  &rarr;  WEATHER_CODES, describe_weather(), parse_city()
+8.3  &rarr;  TIMEOUT, raise_for_status(), except (aiohttp.ClientError, TimeoutError)</code></pre>
+
+<h3>Что изменилось в проекте</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Файл</th>
+			<th>Изменения</th>
+		</tr>
+		<tr>
+			<td><code>weather.py</code></td>
+			<td><strong>новый</strong>: <code>WEATHER_CODES</code>, <code>get_json()</code>, <code>parse_city()</code>, <code>describe_weather()</code>, <code>find_city()</code>, <code>get_weather()</code></td>
+		</tr>
+		<tr>
+			<td><code>database.py</code></td>
+			<td>таблица <code>users</code> в <code>CREATE_TABLES</code>; добавлены <code>set_city()</code>, <code>get_city()</code></td>
+		</tr>
+		<tr>
+			<td><code>texts.py</code></td>
+			<td>добавлены <code>CITY_USAGE</code>, <code>CITY_SAVED</code>, <code>CITY_NOT_FOUND</code>, <code>MORNING</code>, <code>WEATHER_LINE</code>, <code>NO_WEATHER</code>, <code>NO_CITY</code>; <code>/morning</code> и <code>/city</code> в <code>MENU</code> и <code>HELP</code></td>
+		</tr>
+		<tr>
+			<td><code>handlers/habits.py</code></td>
+			<td>импорт <code>CommandObject</code> и <code>weather</code>; добавлены <code>cmd_city()</code>, <code>build_morning_text()</code>, <code>cmd_morning()</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<details><summary>📄 weather.py целиком</summary>
+
+<pre><code class="language-python">"""Погода от Open-Meteo: запросы и разбор ответов."""
+import logging
+
+import aiohttp
+
+GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+logger = logging.getLogger(__name__)
+
+WEATHER_CODES = {
+    0: "ясно",
+    1: "в основном ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "ливень",
+    95: "гроза",
+}
+
+
+async def get_json(url: str, params: dict) -&gt; dict:
+    async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+        async with session.get(url, params=params) as response:
+            response.raise_for_status()
+            return await response.json()
+
+
+def parse_city(data: dict) -&gt; tuple[str, float, float] | None:
+    results = data.get("results")
+    if not results:
+        return None
+
+    place = results[0]
+    name = place.get("name")
+    latitude = place.get("latitude")
+    longitude = place.get("longitude")
+    if name is None or latitude is None or longitude is None:
+        return None
+    return name, latitude, longitude
+
+
+def describe_weather(data: dict) -&gt; str | None:
+    current = data.get("current")
+    if not current:
+        return None
+
+    temperature = current.get("temperature_2m")
+    code = current.get("weather_code")
+    if temperature is None or code is None:
+        return None
+
+    degrees = round(temperature)
+    if degrees == 0:
+        sign = "0"
+    else:
+        sign = f"{degrees:+d}"
+    text = WEATHER_CODES.get(code, "без описания")
+    return f"{sign}, {text}"
+
+
+async def find_city(city: str) -&gt; tuple[str, float, float] | None:
+    params = {"name": city, "count": 1, "language": "ru"}
+    try:
+        data = await get_json(GEO_URL, params)
+    except (aiohttp.ClientError, TimeoutError) as error:
+        name = type(error).__name__
+        logger.warning("Геокодер недоступен для %s: %s", city, name)
+        return None
+
+    place = parse_city(data)
+    if place is None:
+        logger.info("Город не найден: %s", city)
+    return place
+
+
+async def get_weather(latitude: float, longitude: float) -&gt; str | None:
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": "temperature_2m,weather_code",
+    }
+    try:
+        data = await get_json(FORECAST_URL, params)
+    except (aiohttp.ClientError, TimeoutError) as error:
+        name = type(error).__name__
+        logger.warning("Погода недоступна: %s", name)
+        return None
+
+    text = describe_weather(data)
+    if text is None:
+        logger.warning("Неожиданный ответ прогноза")
+    return text</code></pre>
+</details>
+
+<details><summary>📄 handlers/habits.py целиком</summary>
+
+<pre><code class="language-python">from datetime import date, timedelta
+
+from aiogram import F, Router, html
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command, CommandObject
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+
+import database
+import keyboards
+import texts
+import weather
+from streak import count_streak
+
+router = Router(name="habits")
+
+STATS_DAYS = 30
+
+async def build_today_screen(
+    user_id: int,
+    day: date,
+    page: int,
+) -&gt; tuple[str, InlineKeyboardMarkup | None]:
+    habits = await database.get_habits(user_id)
+    done_ids = await database.get_done_ids(user_id, day)
+
+    text = texts.build_today_text(
+        day=day,
+        done=await database.count_done(user_id, day),
+        total=len(habits),
+    )
+
+    markup = keyboards.habits_keyboard(
+        habits,
+        done_ids=done_ids,
+        page=page,
+    )
+
+    return text, markup
+
+async def edit_today_message(
+    message: Message,
+    user_id: int,
+    day: date,
+    page: int,
+) -&gt; None:
+    text, markup = await build_today_screen(user_id, day, page)
+
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=markup,
+        )
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error):
+            raise
+
+@router.message(Command("today"))
+async def cmd_today(message: Message) -&gt; None:
+    day = date.today()
+    text, markup = await build_today_screen(
+        message.from_user.id,
+        day,
+        page=0,
+    )
+
+    await message.answer(
+        text,
+        reply_markup=markup,
+    )
+
+@router.message(Command("list"))
+async def cmd_list(message: Message) -&gt; None:
+    day = date.today()
+    text, markup = await build_today_screen(
+        message.from_user.id,
+        day,
+        page=0,
+    )
+
+    await message.answer(
+        text,
+        reply_markup=markup,
+    )
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -&gt; None:
+    user_id = message.from_user.id
+    today = date.today()
+    since = today - timedelta(days=STATS_DAYS - 1)
+
+    rows = await database.get_stats(user_id, since, today)
+    if not rows:
+        await message.answer(texts.EMPTY_TODAY)
+        return
+
+    lines = [texts.STATS_TITLE.format(days=STATS_DAYS)]
+    for row in rows:
+        days = await database.get_mark_days(user_id, row["id"], today)
+        lines.append(
+            texts.STATS_LINE.format(
+                name=html.quote(row["name"]),
+                done=row["done"],
+                streak=count_streak(days, today),
+            )
+        )
+
+    await message.answer("\n".join(lines))
+
+@router.message(Command("city"))
+async def cmd_city(message: Message, command: CommandObject) -&gt; None:
+    if not command.args:
+        await message.answer(texts.CITY_USAGE)
+        return
+
+    query = command.args.strip()
+    place = await weather.find_city(query)
+    if place is None:
+        await message.answer(
+            texts.CITY_NOT_FOUND.format(city=html.quote(query))
+        )
+        return
+
+    city, latitude, longitude = place
+    await database.set_city(message.from_user.id, city, latitude, longitude)
+    await message.answer(texts.CITY_SAVED.format(city=html.quote(city)))
+
+async def build_morning_text(user_id: int, day: date) -&gt; str:
+    place = await database.get_city(user_id)
+    if place is None:
+        weather_line = texts.NO_CITY
+    else:
+        forecast = await weather.get_weather(
+            place["latitude"], place["longitude"]
+        )
+        if forecast is None:
+            weather_line = texts.NO_WEATHER
+        else:
+            weather_line = texts.WEATHER_LINE.format(
+                city=html.quote(place["city"]),
+                weather=forecast,
+            )
+
+    habits = await database.get_habits(user_id)
+    done_ids = await database.get_done_ids(user_id, day)
+    if not habits:
+        habits_text = texts.EMPTY_TODAY
+    else:
+        lines = []
+        for habit in habits:
+            mark = "✅" if habit["id"] in done_ids else "⬜"
+            lines.append(f"{mark} {html.quote(habit['name'])}")
+        habits_text = "\n".join(lines)
+
+    return texts.MORNING.format(weather=weather_line, habits=habits_text)
+
+@router.message(Command("morning"))
+async def cmd_morning(message: Message) -&gt; None:
+    text = await build_morning_text(message.from_user.id, date.today())
+    await message.answer(text)
+
+@router.callback_query(F.data.startswith("page_"))
+async def switch_page(callback: CallbackQuery) -&gt; None:
+    if not isinstance(callback.message, Message):
+        await callback.answer(
+            texts.CB_MESSAGE_UNAVAILABLE,
+            show_alert=True,
+        )
+        return
+
+    page_text = callback.data.removeprefix("page_")
+
+    if not page_text.isdigit():
+        await callback.answer(
+            texts.CB_OLD_BUTTON,
+            show_alert=True,
+        )
+        return
+
+    page = int(page_text)
+    day = date.today()
+
+    await edit_today_message(
+        callback.message,
+        user_id=callback.from_user.id,
+        day=day,
+        page=page,
+    )
+
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("toggle_"))
+async def toggle_habit_from_list(
+    callback: CallbackQuery,
+) -&gt; None:
+    if not isinstance(callback.message, Message):
+        await callback.answer(
+            texts.CB_MESSAGE_UNAVAILABLE,
+            show_alert=True,
+        )
+        return
+
+    payload = callback.data.removeprefix("toggle_")
+    parts = payload.split("_")
+
+    if (
+        len(parts) != 2
+        or not parts[0].isdigit()
+        or not parts[1].isdigit()
+    ):
+        await callback.answer(
+            texts.CB_OLD_BUTTON,
+            show_alert=True,
+        )
+        return
+
+    habit_id = int(parts[0])
+    page = int(parts[1])
+
+    habit = await database.get_habit(callback.from_user.id, habit_id)
+
+    if habit is None:
+        await callback.answer(
+            texts.CB_HABIT_GONE,
+            show_alert=True,
+        )
+        return
+
+    day = date.today()
+    marked = await database.toggle_mark(habit_id, day)
+
+    await edit_today_message(
+        callback.message,
+        user_id=callback.from_user.id,
+        day=day,
+        page=page,
+    )
+
+    if marked:
+        await callback.answer(texts.CB_MARKED)
+    else:
+        await callback.answer(texts.CB_UNDONE)
+
+@router.callback_query()
+async def old_callback(callback: CallbackQuery) -&gt; None:
+    await callback.answer(
+        texts.CB_OLD_BUTTON,
+        show_alert=True,
+    )</code></pre>
+</details>
+
+<details><summary>📄 database.py целиком</summary>
+
+<pre><code class="language-python">"""Хранилище ПривычкаБота в базе SQLite."""
+from datetime import date
+
+import aiosqlite
+
+DB_PATH = "habits.db"
+
+CREATE_TABLES = """
+CREATE TABLE IF NOT EXISTS habits (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    name        TEXT    NOT NULL,
+    frequency   INTEGER NOT NULL,
+    remind_time TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS marks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    habit_id    INTEGER NOT NULL,
+    marked_date TEXT    NOT NULL,
+    UNIQUE (habit_id, marked_date)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id   INTEGER PRIMARY KEY,
+    city      TEXT    NOT NULL,
+    latitude  REAL    NOT NULL,
+    longitude REAL    NOT NULL
+);
+"""
+
+
+async def init_db() -&gt; None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(CREATE_TABLES)
+        await db.commit()
+
+
+async def add_habit(
+    user_id: int, name: str, frequency: int, remind_time: str
+) -&gt; dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO habits (user_id, name, frequency, remind_time) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, name, frequency, remind_time),
+        )
+        await db.commit()
+    return {
+        "id": cursor.lastrowid,
+        "name": name,
+        "frequency": frequency,
+        "remind_time": remind_time,
+    }
+
+
+async def get_habits(user_id: int) -&gt; list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, name, frequency, remind_time FROM habits "
+            "WHERE user_id = ? ORDER BY id",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_habit(user_id: int, habit_id: int) -&gt; dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, name, frequency, remind_time FROM habits "
+            "WHERE id = ? AND user_id = ?",
+            (habit_id, user_id),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return dict(row)
+
+
+async def toggle_mark(habit_id: int, day: date) -&gt; bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM marks WHERE habit_id = ? AND marked_date = ?",
+            (habit_id, day.isoformat()),
+        )
+        if cursor.rowcount &gt; 0:
+            await db.commit()
+            return False
+
+        await db.execute(
+            "INSERT INTO marks (habit_id, marked_date) VALUES (?, ?)",
+            (habit_id, day.isoformat()),
+        )
+        await db.commit()
+        return True
+
+
+async def count_done(user_id: int, day: date) -&gt; int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) "
+            "FROM marks m "
+            "JOIN habits h ON h.id = m.habit_id "
+            "WHERE h.user_id = ? AND m.marked_date = ?",
+            (user_id, day.isoformat()),
+        )
+        row = await cursor.fetchone()
+    return row[0]
+
+
+async def get_stats(user_id: int, since: date, until: date) -&gt; list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT h.id, h.name, COUNT(m.id) AS done "
+            "FROM habits h "
+            "LEFT JOIN marks m ON m.habit_id = h.id "
+            "AND m.marked_date &gt;= ? AND m.marked_date &lt;= ? "
+            "WHERE h.user_id = ? "
+            "GROUP BY h.id, h.name "
+            "ORDER BY done DESC, h.id",
+            (since.isoformat(), until.isoformat(), user_id),
+        )
+        rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_mark_days(user_id: int, habit_id: int, today: date) -&gt; list[date]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT m.marked_date "
+            "FROM marks m "
+            "JOIN habits h ON h.id = m.habit_id "
+            "WHERE m.habit_id = ? AND h.user_id = ? AND m.marked_date &lt;= ? "
+            "ORDER BY m.marked_date DESC",
+            (habit_id, user_id, today.isoformat()),
+        )
+        rows = await cursor.fetchall()
+
+    days = []
+    for row in rows:
+        days.append(date.fromisoformat(row[0]))
+    return days
+
+
+async def get_done_ids(user_id: int, day: date) -&gt; set[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT m.habit_id "
+            "FROM marks m "
+            "JOIN habits h ON h.id = m.habit_id "
+            "WHERE h.user_id = ? AND m.marked_date = ?",
+            (user_id, day.isoformat()),
+        )
+        rows = await cursor.fetchall()
+
+    done_ids = set()
+    for row in rows:
+        done_ids.add(row[0])
+    return done_ids
+
+
+async def set_city(
+    user_id: int, city: str, latitude: float, longitude: float
+) -&gt; None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, city, latitude, longitude) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (user_id) DO UPDATE SET "
+            "city = excluded.city, "
+            "latitude = excluded.latitude, "
+            "longitude = excluded.longitude",
+            (user_id, city, latitude, longitude),
+        )
+        await db.commit()
+
+
+async def get_city(user_id: int) -&gt; dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT city, latitude, longitude FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return dict(row)</code></pre>
+</details>
+
+<blockquote><strong>⚠️ Что пока остаётся учебным:</strong><br />
+Утреннее сообщение приходит только по команде <code>/morning</code>. Время напоминания у каждой привычки хранится с модуля 6, но бот по нему ничего не присылает. И пока бот запущен на вашем компьютере, он работает, только пока открыт терминал.</blockquote>
+
+<h2>📋 Итог модуля 8</h2>
+
+<p>Модуль начался с того, что боту не хватало данных, которых нет у пользователя. Теперь ПривычкаБот берёт их из чужого сервиса и не зависит от его настроения.</p>
+
+<ul>
+	<li>✅ <strong>8.1</strong> &mdash; HTTP-запрос и ответ; <code>requests</code> останавливает event loop, <code>aiohttp</code> &mdash; нет; значения в запрос &mdash; через <code>params=</code>; несколько запросов &mdash; через <code>gather()</code></li>
+	<li>✅ <strong>8.2</strong> &mdash; ответ &mdash; JSON; путь к значению ключ за ключом; чужому ответу не доверяем: <code>.get()</code>, проверки, <code>None</code></li>
+	<li>✅ <strong>8.3</strong> &mdash; таймаут, каталог отказов, <code>raise_for_status()</code>; ловим только ожидаемое; отказ &mdash; обычная ветка сценария</li>
+	<li>✅ <strong>8.4</strong> &mdash; погода в проекте: <code>weather.py</code>, таблица <code>users</code>, <code>/city</code>, утреннее сообщение</li>
+</ul>
+
+<h3>📝 Что вы умеете после модуля 8</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Урок</th>
+			<th>Навык</th>
+		</tr>
+		<tr>
+			<td>8.1</td>
+			<td>Отправить HTTP-запрос из асинхронного бота, не остановив его для остальных</td>
+		</tr>
+		<tr>
+			<td>8.2</td>
+			<td>Достать нужное из вложенного JSON и пережить ответ не того формата</td>
+		</tr>
+		<tr>
+			<td>8.3</td>
+			<td>Ограничить ожидание и обработать отказы сервиса, не пряча ошибки своего кода</td>
+		</tr>
+		<tr>
+			<td>8.4</td>
+			<td>Подключить внешний сервис к боту: настройка пользователя в базе, команда с аргументом, сообщение из нескольких источников</td>
+		</tr>
+	</tbody>
+</table>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>Утреннее сообщение готово, но его нужно запрашивать командой. Время напоминания у каждой привычки бот спрашивает с модуля 6 &mdash; а само сообщение так и не приходит.</p>
+
+<p>Чтобы оно пришло, бот должен начать действовать без пользователя: проснуться в 07:30, найти, кому пора, и вызвать <code>build_morning_text()</code>. Но это возможно, только если бот в 07:30 работает. Пока он запущен в терминале на вашем компьютере, он спит вместе с компьютером.</p>
+
+<p>В модуле 9 ПривычкаБот научится работать по расписанию и переедет на сервер, где работает круглосуточно. Начнём урок 9.1 с вопроса: как боту узнать, что наступило 07:30, если ему никто не пишет?</p>

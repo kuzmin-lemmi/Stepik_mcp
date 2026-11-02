@@ -1,0 +1,846 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 9.3. systemd: автозапуск и перезапуск после сбоя</h2>
+
+<p><strong>Аннотация:</strong><br />
+В уроке 9.2 ПривычкаБот переехал на сервер и ответил оттуда Ане. Но урок закончился поломкой: закрыли терминал &mdash; бот исчез. А ещё бот не поднимется, если упадёт с ошибкой, и не запустится после перезагрузки сервера. Пока бот живёт, только пока мы на него смотрим.</p>
+
+<p>Сегодня передадим бота systemd &mdash; программе, которая в Ubuntu запускает и сторожит все службы сервера. Опишем бота одним файлом, и дальше сервер будет держать его запущенным сам.</p>
+
+<p>Это практикум: каждую команду выполняете вы, после каждого раздела &mdash; проверка.</p>
+
+<blockquote><strong>🛠 Под каким пользователем:</strong><br />
+Управлять службами может только администратор, поэтому команды этого урока выполняются <strong>на сервере под <code>root</code></strong>: <code>ssh root@203.0.113.10</code>. Сам бот при этом будет работать под <code>bot</code> &mdash; об этом позаботится одна строка настроек. Исключение &mdash; раздел 6, где код обновляется: там сказано, где что выполнять.</blockquote>
+
+<blockquote><strong>🎯 Что сделаем:</strong><br />
+&bull; Разберёмся, что такое служба и что нам от неё нужно &mdash; <strong>раздел 1</strong><br />
+&bull; Опишем бота в unit-файле <code>habitbot.service</code> &mdash; <strong>раздел 2</strong><br />
+&bull; Запустим службу и научимся ей управлять &mdash; <strong>раздел 3</strong><br />
+&bull; Прочитаем вывод бота в журнале и починим пропавший <code>print()</code> &mdash; <strong>раздел 4</strong><br />
+&bull; Проверим три аварии: убитый процесс, перезагрузку, ошибку в коде &mdash; <strong>раздел 5</strong><br />
+&bull; Обновим код бота, не потеряв данные &mdash; <strong>раздел 6</strong></blockquote>
+
+<h2>⚙️ 1. Служба вместо терминала</h2>
+
+<p>Вспомним, что пошло не так в уроке 9.2. Бот был запущен в SSH-сессии. Сессия принадлежит человеку, который вошёл, и закончилась вместе с ним &mdash; а с ней и всё, что в ней запущено.</p>
+
+<p>Нужно, чтобы бота запускал не человек, а сам сервер. На каждом сервере Ubuntu работают десятки программ, которые никто не запускает руками: SSH-сервер, к которому вы подключаетесь, журнал системы, планировщик обновлений. Такие программы называются <strong>службами</strong>, а управляет ими <strong>systemd</strong>. Это первая программа, которая стартует при включении сервера, и она запускает остальные.</p>
+
+<p>От systemd нам нужно четыре вещи:</p>
+
+<ul>
+	<li>запустить бота, не привязывая его к сессии;</li>
+	<li>поднять его, если он упал;</li>
+	<li>запустить его сам после перезагрузки сервера;</li>
+	<li>сохранять всё, что бот печатает, чтобы это можно было прочитать потом.</li>
+</ul>
+
+<p>Для этого systemd нужно описание службы: что запускать, откуда, от чьего имени и что делать при сбое. Такое описание называется <strong>unit-файлом</strong>.</p>
+
+<blockquote><strong>📌 Как проверялся урок:</strong><br />
+Как и в уроке 9.2, все команды мы выполнили на стенде: Ubuntu 24.04 с настоящим systemd на месте VPS. Вывод <code>systemctl</code> и <code>journalctl</code> в уроке настоящий, со стенда. Время в выводе &mdash; по UTC, как на сервере.</blockquote>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>📄 2. Unit-файл habitbot.service</h2>
+
+<h3>Шаг 1. Узнать путь к Python</h3>
+
+<p>systemd ничего не знает про виртуальные окружения и не будет выполнять <code>source .venv/bin/activate</code>. Ему нужен полный путь к Python из окружения. Узнаем его <strong>на сервере под <code>bot</code></strong>, как в уроке 9.2:</p>
+
+<pre><code>cd ~/habit_bot
+source .venv/bin/activate
+which python</code></pre>
+
+<pre><code>/home/bot/habit_bot/.venv/bin/python</code></pre>
+
+<p>Активация окружения делает ровно это: подставляет вместо <code>python</code> этот путь. Если запускать Python из <code>.venv</code> по полному пути, он и так увидит библиотеки окружения. Выйдите (<code>exit</code>) и войдите под <code>root</code>.</p>
+
+<h3>Шаг 2. Создать файл</h3>
+
+<p>Unit-файлы служб, которые вы добавляете сами, лежат в папке <code>/etc/systemd/system/</code>. <strong>На сервере под <code>root</code></strong> откройте новый файл в редакторе <code>nano</code>:</p>
+
+<pre><code>nano /etc/systemd/system/habitbot.service</code></pre>
+
+<p>Вставьте текст файла &mdash; он показан ниже, в выводе <code>cat</code> (в терминале &mdash; правой кнопкой мыши или <code>Ctrl+Shift+V</code>), сохраните <code>Ctrl+O</code>, <code>Enter</code> и выйдите <code>Ctrl+X</code>. Проверим, что получилось:</p>
+
+<pre><code>cat /etc/systemd/system/habitbot.service</code></pre>
+
+<pre><code>[Unit]
+Description=ПривычкаБот
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bot
+WorkingDirectory=/home/bot/habit_bot
+ExecStart=/home/bot/habit_bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+<h3>Что здесь написано</h3>
+
+<p>Файл делится на три раздела в квадратных скобках.</p>
+
+<p><strong><code>[Unit]</code> &mdash; что это за служба.</strong></p>
+
+<ul>
+	<li><code>Description</code> &mdash; название для людей; его покажут <code>status</code> и журнал.</li>
+	<li><code>After=network-online.target</code> и <code>Wants=network-online.target</code> &mdash; запускать бота после того, как у сервера появилась сеть. Без сети бот не дотянется до Telegram и упадёт при старте.</li>
+</ul>
+
+<p><strong><code>[Service]</code> &mdash; как её запускать.</strong></p>
+
+<ul>
+	<li><code>User=bot</code> &mdash; от чьего имени. Без этой строки бот работал бы под <code>root</code> &mdash; урок 9.2 объяснил, почему так не надо.</li>
+	<li><code>WorkingDirectory=/home/bot/habit_bot</code> &mdash; в какой папке запускать. Это та самая &laquo;папка, откуда запущен терминал&raquo; из урока 7.2: от неё считается путь <code>"habits.db"</code>.</li>
+	<li><code>ExecStart</code> &mdash; команда запуска: Python из окружения и <code>bot.py</code>. Путь к программе должен быть полным.</li>
+	<li><code>Restart=on-failure</code> &mdash; перезапускать, если бот завершился с ошибкой.</li>
+	<li><code>RestartSec=5</code> &mdash; подождать перед перезапуском 5 секунд. Если сервер Telegram на минуту недоступен, бот не будет перезапускаться сотни раз подряд.</li>
+</ul>
+
+<p><strong><code>[Install]</code> &mdash; когда включать.</strong></p>
+
+<ul>
+	<li><code>WantedBy=multi-user.target</code> &mdash; запускать при обычной загрузке сервера. <code>multi-user.target</code> &mdash; это состояние &laquo;сервер загрузился и готов к работе&raquo;.</li>
+</ul>
+
+<p>Вопрос перед тестом: что будет, если убрать строку <code>WorkingDirectory</code>, а в <code>ExecStart</code> указать полный путь к <code>bot.py</code>?</p>
+
+
+<!-- ═══ ШАГ 3 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Из unit-файла убрали <code>WorkingDirectory</code>, а в <code>ExecStart</code> написали полный путь: <code>/home/bot/habit_bot/.venv/bin/python /home/bot/habit_bot/bot.py</code>. Что произойдёт при запуске службы?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Бот упадёт при старте: <code>habits.db</code> ищется не в папке проекта, и базу не открыть ✅</li>
+	<li>Ничего: путь к <code>bot.py</code> полный, значит, и база найдётся рядом с ним</li>
+	<li>Бот запустится под <code>root</code></li>
+	<li>systemd откажется принимать файл без <code>WorkingDirectory</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Мы проверили: без <code>WorkingDirectory</code> служба запускается из корня диска <code>/</code>. Бот пытается создать там <code>/habits.db</code>, но у пользователя <code>bot</code> нет прав писать в корень. В журнале &mdash; <code>sqlite3.OperationalError: unable to open database file</code>, и служба перезапускается по кругу.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните урок 7.2 и раздел 8 урока 9.2: от чего отсчитывается путь <code>"habits.db"</code> &mdash; от папки с <code>bot.py</code> или от папки, где запущена программа?</p>
+
+
+<!-- ═══ ШАГ 4 · text · новый шаг ═══ -->
+
+<h2>▶️ 3. Запуск и управление</h2>
+
+<h3>Шаг 1. Сообщить systemd о новом файле</h3>
+
+<p>systemd читает unit-файлы при загрузке. О новом или изменённом файле ему нужно сказать:</p>
+
+<pre><code>systemctl daemon-reload</code></pre>
+
+<p>Команда ничего не печатает. Запомните её: после <strong>каждого</strong> изменения unit-файла &mdash; <code>daemon-reload</code>.</p>
+
+<h3>Шаг 2. Включить и запустить</h3>
+
+<pre><code>systemctl enable --now habitbot</code></pre>
+
+<pre><code>Created symlink /etc/systemd/system/multi-user.target.wants/habitbot.service → /etc/systemd/system/habitbot.service.</code></pre>
+
+<p>В одной команде два действия:</p>
+
+<ul>
+	<li><code>enable</code> &mdash; включить автозапуск. systemd создал ссылку на наш файл в папке <code>multi-user.target.wants</code>: &laquo;при загрузке сервера нужен и этот&raquo;. Сам бот от этого не запускается.</li>
+	<li><code>--now</code> &mdash; заодно запустить прямо сейчас.</li>
+</ul>
+
+<h3>Шаг 3. Проверить</h3>
+
+<pre><code>systemctl status habitbot</code></pre>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-11-01 16:27:31 UTC; 4s ago
+   Main PID: 695 (python)
+        CPU: 2.270s
+     CGroup: /system.slice/habitbot.service
+             └─695 /home/bot/habit_bot/.venv/bin/python bot.py
+
+Nov 01 16:27:31 vm systemd[1]: Started habitbot.service - ПривычкаБот.</code></pre>
+
+<p>Читаем сверху вниз:</p>
+
+<ul>
+	<li><code>●</code> &mdash; зелёная точка в терминале: служба работает;</li>
+	<li><code>Loaded: ... enabled</code> &mdash; файл прочитан, автозапуск включён;</li>
+	<li><code>Active: active (running)</code> &mdash; бот работает, и сколько времени;</li>
+	<li><code>Main PID</code> &mdash; номер процесса бота;</li>
+	<li><code>CGroup</code> &mdash; какая команда запущена;</li>
+	<li>внизу &mdash; последние строки журнала службы, о нём в разделе 4.</li>
+</ul>
+
+<p>Если вывод не помещается в окно, <code>status</code> откроет его в просмотрщике: листать стрелками, выйти &mdash; <code>q</code>.</p>
+
+<p>Отправьте боту <code>/today</code>:</p>
+
+<pre><code>  Аня: /today
+  Бот: Мои привычки на сегодня
+       текущая дата
+
+       Выполнено: 0 из 2
+
+       [ ⬜ Растяжка ]
+       [ ⬜ Чтение ]</code></pre>
+
+<p>Теперь главная проверка: закройте окно терминала. Подключитесь заново под <code>root</code> и снова посмотрите статус. Мы проверили &mdash; первые три строки до закрытия окна и после:</p>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-11-01 16:31:48 UTC; 33s ago</code></pre>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-11-01 16:31:48 UTC; 37s ago</code></pre>
+
+<p>Время запуска то же: бот не перезапускался и не заметил, что вы ушли. Он больше не связан ни с одной сессией.</p>
+
+<h3>Команды управления</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Команда</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td><code>systemctl start habitbot</code></td>
+			<td>Запустить</td>
+		</tr>
+		<tr>
+			<td><code>systemctl stop habitbot</code></td>
+			<td>Остановить; сам он после этого не поднимется</td>
+		</tr>
+		<tr>
+			<td><code>systemctl restart habitbot</code></td>
+			<td>Остановить и запустить: после обновления кода</td>
+		</tr>
+		<tr>
+			<td><code>systemctl status habitbot</code></td>
+			<td>Посмотреть состояние</td>
+		</tr>
+		<tr>
+			<td><code>systemctl enable habitbot</code></td>
+			<td>Включить автозапуск при загрузке сервера</td>
+		</tr>
+		<tr>
+			<td><code>systemctl disable habitbot</code></td>
+			<td>Выключить автозапуск; работающего бота не останавливает</td>
+		</tr>
+		<tr>
+			<td><code>systemctl daemon-reload</code></td>
+			<td>Перечитать unit-файлы после изменения</td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>🔑 Бот &mdash; служба сервера:</strong><br />
+Unit-файл описывает, что и как запускать. <code>enable</code> включает автозапуск, <code>start</code> запускает сейчас, <code>enable --now</code> делает и то и другое. Служба не зависит от SSH-сессий.</blockquote>
+
+
+<!-- ═══ ШАГ 5 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Бота запустили командой <code>systemctl start habitbot</code>, а <code>enable</code> не выполнили. Что будет после перезагрузки сервера?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Бот не запустится: автозапуск не включён ✅</li>
+	<li>Бот запустится: <code>start</code> запоминается до следующей загрузки</li>
+	<li>Бот запустится, но не под <code>bot</code>, а под <code>root</code></li>
+	<li>Сервер не загрузится, пока служба не включена</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. <code>start</code> &mdash; &laquo;запусти сейчас&raquo;, <code>enable</code> &mdash; &laquo;запускай при каждой загрузке&raquo;. Нужны оба, поэтому удобно <code>enable --now</code>.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите на вывод <code>enable</code> в разделе 3: что именно он создал? И есть ли в выводе <code>start</code> что-то похожее?</p>
+
+
+<!-- ═══ ШАГ 6 · text · новый шаг ═══ -->
+
+<h2>📜 4. Журнал: куда делся вывод бота</h2>
+
+<p>Раньше всё, что печатал бот, появлялось в терминале. Теперь терминала нет. Вывод службы systemd собирает в <strong>журнал</strong>, а читает его команда <code>journalctl</code>. <code>-u habitbot</code> &mdash; только записи нашей службы:</p>
+
+<pre><code>journalctl -u habitbot</code></pre>
+
+<pre><code>Nov 01 16:27:31 vm systemd[1]: Started habitbot.service - ПривычкаБот.</code></pre>
+
+<p>Одна строка, и написал её systemd: служба запущена. А где строка самого бота &mdash; &laquo;ПривычкаБот запущен. Ctrl+C для остановки.&raquo;? Бот работает, на <code>/today</code> отвечает, значит, <code>print()</code> выполнился.</p>
+
+<h3>Буферизация</h3>
+
+<p>Дело в том, куда печатает <code>print()</code>. Когда вывод идёт в терминал, Python отправляет каждую строку сразу: человек ждёт. Когда вывод идёт в программу &mdash; как теперь, в журнал, &mdash; Python копит текст в памяти и отправляет его кусками по несколько килобайт. Так быстрее. Одна короткая строка будет ждать в памяти, пока не наберётся остальное или пока бот не завершится.</p>
+
+<p>Для бота это плохо: строка о запуске появится в журнале через часы или после остановки. Включим отправку сразу. Добавьте в раздел <code>[Service]</code> строку:</p>
+
+<pre><code>Environment=PYTHONUNBUFFERED=1</code></pre>
+
+<p><code>Environment</code> задаёт переменную окружения для бота, а <code>PYTHONUNBUFFERED=1</code> говорит Python не копить вывод. То же делает ключ <code>python -u</code> в <code>ExecStart</code> &mdash; работают оба способа, мы выбрали переменную. Файл изменился &mdash; значит, <code>daemon-reload</code>, а потом перезапуск:</p>
+
+<pre><code>systemctl daemon-reload
+systemctl restart habitbot</code></pre>
+
+<pre><code>journalctl -u habitbot -n 5</code></pre>
+
+<pre><code>Nov 01 16:27:39 vm systemd[1]: habitbot.service: Deactivated successfully.
+Nov 01 16:27:39 vm systemd[1]: Stopped habitbot.service - ПривычкаБот.
+Nov 01 16:27:39 vm systemd[1]: habitbot.service: Consumed 2.696s CPU time.
+Nov 01 16:27:39 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:27:42 vm python[736]: ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<p><code>-n 5</code> &mdash; последние пять строк. Видно, как systemd остановил старый процесс и запустил новый, а новый сразу написал свою строку. Номер в <code>python[736]</code> &mdash; номер процесса.</p>
+
+<blockquote><strong>💡 А сообщения logging?</strong><br />
+Записи модуля <code>logging</code> &mdash; например, &laquo;Погода недоступна&raquo; из урока 8.4 &mdash; идут не в стандартный вывод, а в поток ошибок, и Python отправляет его построчно. Они попадали бы в журнал и без <code>PYTHONUNBUFFERED</code>. Залипает только <code>print()</code>.</blockquote>
+
+<h3>Журнал в реальном времени</h3>
+
+<p>Чтобы смотреть, что происходит сейчас, добавьте <code>-f</code> (follow &mdash; следить):</p>
+
+<pre><code>journalctl -u habitbot -f</code></pre>
+
+<p>Команда не завершится: она ждёт новые строки. Откройте второе окно, войдите под <code>root</code> и перезапустите бота: <code>systemctl restart habitbot</code>. В первом окне появится:</p>
+
+<pre><code>Nov 01 16:27:47 vm systemd[1]: Stopping habitbot.service - ПривычкаБот...
+Nov 01 16:27:47 vm python[736]: Received SIGTERM signal
+Nov 01 16:27:47 vm systemd[1]: habitbot.service: Deactivated successfully.
+Nov 01 16:27:47 vm systemd[1]: Stopped habitbot.service - ПривычкаБот.
+Nov 01 16:27:47 vm systemd[1]: habitbot.service: Consumed 2.838s CPU time.
+Nov 01 16:27:47 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:27:51 vm python[774]: ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<p>Строка <code>Received SIGTERM signal</code> &mdash; от aiogram. При остановке systemd посылает боту сигнал <code>SIGTERM</code> &mdash; вежливую просьбу завершиться. aiogram перехватывает его, как <code>Ctrl+C</code> в уроке 9.2, и аккуратно заканчивает опрос. Выйти из <code>-f</code> &mdash; <code>Ctrl+C</code>.</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Команда</th>
+			<th>Что показывает</th>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot</code></td>
+			<td>Весь журнал службы, от старых записей к новым</td>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot -n 50</code></td>
+			<td>Последние 50 строк</td>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot -f</code></td>
+			<td>Новые строки по мере появления</td>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot --since "1 hour ago"</code></td>
+			<td>Записи за последний час</td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>🔑 Вывод бота &mdash; в журнале:</strong><br />
+<code>journalctl -u habitbot</code> показывает всё, что бот напечатал, и что с ним делал systemd. Чтобы <code>print()</code> попадал туда сразу, в unit-файле нужна строка <code>Environment=PYTHONUNBUFFERED=1</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 7 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Бот работает как служба systemd. Где посмотреть, что он напечатал и почему упал?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>В журнале: <code>journalctl -u habitbot</code> ✅</li>
+	<li>В терминале, где выполнялась команда <code>systemctl start</code></li>
+	<li>В файле <code>bot.log</code> в папке проекта</li>
+	<li>Нигде: у службы нет вывода</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. И последние строки журнала видны внизу <code>systemctl status habitbot</code>.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Служба не связана с терминалом &mdash; мы проверили это, закрыв окно. Какая команда в разделе 4 показала строки, которые напечатал бот?</p>
+
+
+<!-- ═══ ШАГ 8 · text · новый шаг ═══ -->
+
+<h2>💥 5. Три аварии</h2>
+
+<p>Ради этого всё и делалось. Устроим боту неприятности и посмотрим, как systemd с ними справляется.</p>
+
+<h3>Авария 1. Процесс убит</h3>
+
+<p>Самое грубое, что может случиться с программой, &mdash; её убивают без предупреждения: кончилась память, система завершила процесс. Изобразим это сигналом <code>SIGKILL</code>, который нельзя перехватить. Узнаем номер процесса:</p>
+
+<pre><code>systemctl show -p MainPID --value habitbot</code></pre>
+
+<pre><code>774</code></pre>
+
+<p>И убьём его. У вас номер будет другой:</p>
+
+<pre><code>kill -9 774</code></pre>
+
+<p>Подождите секунд десять и посмотрите статус:</p>
+
+<pre><code>systemctl status habitbot</code></pre>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-11-01 16:27:59 UTC; 2s ago
+   Main PID: 779 (python)
+        CPU: 2.493s
+     CGroup: /system.slice/habitbot.service
+             └─779 /home/bot/habit_bot/.venv/bin/python bot.py
+
+Nov 01 16:27:59 vm systemd[1]: habitbot.service: Scheduled restart job, restart counter is at 1.
+Nov 01 16:27:59 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:28:02 vm python[779]: ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<p>Бот снова работает, номер процесса новый. В журнале внизу: <code>Scheduled restart job, restart counter is at 1</code> &mdash; systemd заметил смерть процесса, выждал <code>RestartSec=5</code> и запустил бота заново. Счётчик показывает, который это перезапуск.</p>
+
+<h3>А если завершить вежливо?</h3>
+
+<p>Теперь отправим процессу обычный сигнал <code>SIGTERM</code> &mdash; командой <code>kill</code> без <code>-9</code>, с новым номером процесса. Через десять секунд:</p>
+
+<pre><code>○ habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: inactive (dead) since Sun 2026-11-01 16:28:03 UTC; 7s ago
+   Duration: 3.765s
+    Process: 779 ExecStart=/home/bot/habit_bot/.venv/bin/python bot.py (code=exited, status=0/SUCCESS)
+   Main PID: 779 (code=exited, status=0/SUCCESS)
+        CPU: 2.821s
+
+Nov 01 16:27:59 vm systemd[1]: habitbot.service: Scheduled restart job, restart counter is at 1.
+Nov 01 16:27:59 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:28:02 vm python[779]: ПривычкаБот запущен. Ctrl+C для остановки.
+Nov 01 16:28:02 vm python[779]: Received SIGTERM signal
+Nov 01 16:28:03 vm systemd[1]: habitbot.service: Deactivated successfully.
+Nov 01 16:28:03 vm systemd[1]: habitbot.service: Consumed 2.821s CPU time.</code></pre>
+
+<p>Бот не поднялся: <code>inactive (dead)</code>. Посмотрите на <code>status=0/SUCCESS</code>. aiogram получил <code>SIGTERM</code>, аккуратно завершил работу, и программа вышла с кодом 0 &mdash; &laquo;всё в порядке&raquo;. А <code>Restart=on-failure</code> перезапускает только после сбоя. Выход с кодом 0 сбоем не считается: кто-то вежливо попросил бота завершиться, и он завершился.</p>
+
+<p>Это и есть разница между двумя настройками:</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Как завершился бот</th>
+			<th><code>Restart=on-failure</code></th>
+			<th><code>Restart=always</code></th>
+		</tr>
+		<tr>
+			<td>упал с ошибкой: исключение, код выхода не 0</td>
+			<td>перезапустит</td>
+			<td>перезапустит</td>
+		</tr>
+		<tr>
+			<td>убит сигналом: <code>kill -9</code>, нехватка памяти</td>
+			<td>перезапустит</td>
+			<td>перезапустит</td>
+		</tr>
+		<tr>
+			<td>завершился сам, код 0: <code>kill</code>, <code>SIGTERM</code></td>
+			<td>не перезапустит</td>
+			<td>перезапустит</td>
+		</tr>
+		<tr>
+			<td>остановлен командой <code>systemctl stop</code></td>
+			<td>не перезапустит</td>
+			<td>не перезапустит</td>
+		</tr>
+	</tbody>
+</table>
+
+<p>Мы оставляем <code>on-failure</code>: если бот завершился с кодом 0, значит, его об этом попросили. Запустите его снова:</p>
+
+<pre><code>systemctl start habitbot</code></pre>
+
+
+<!-- ═══ ШАГ 9 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В unit-файле <code>Restart=on-failure</code>. Администратор выполнил <code>kill</code> с номером процесса бота, без <code>-9</code>. aiogram получил <code>SIGTERM</code> и завершился с кодом 0. Что сделает systemd?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Ничего: выход с кодом 0 не считается сбоем, служба останется остановленной ✅</li>
+	<li>Перезапустит бота через <code>RestartSec</code> секунд</li>
+	<li>Перезапустит бота сразу, без паузы</li>
+	<li>Выключит автозапуск службы</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. С <code>Restart=always</code> бот поднялся бы и в этом случае. А после <code>systemctl stop</code> не поднимается при любой настройке: остановку руками systemd уважает.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите на статус после обычного <code>kill</code> в разделе 5: что написано в строке <code>Main PID</code>? Какие случаи перезапускает <code>on-failure</code>?</p>
+
+
+<!-- ═══ ШАГ 10 · text · новый шаг ═══ -->
+
+<h3>Авария 2. Перезагрузка сервера</h3>
+
+<p>Провайдер обновил оборудование, или вы сами поставили обновления, которые требуют перезагрузки. Выполните под <code>root</code>:</p>
+
+<pre><code>reboot</code></pre>
+
+<p>SSH-сессия оборвётся: сервер выключается. Подождите минуту, подключитесь заново и посмотрите статус:</p>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-11-01 16:28:50 UTC; 15s ago
+   Main PID: 73 (python)
+        CPU: 2.927s
+     CGroup: /system.slice/habitbot.service
+             └─73 /home/bot/habit_bot/.venv/bin/python bot.py
+
+Nov 01 16:28:50 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:28:53 vm python[73]: ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+<!-- АВТОР: на стенде перезагрузку изображал перезапуск systemd целиком: все процессы &laquo;сервера&raquo; завершены, система загружена заново -->
+
+<p>Бот запущен 15 секунд назад, при загрузке сервера, &mdash; никто его не просил. Это работа <code>enable</code>. Проверить, что автозапуск включён, можно и отдельной командой:</p>
+
+<pre><code>systemctl is-enabled habitbot</code></pre>
+
+<pre><code>enabled</code></pre>
+
+<p>Аня отправляет <code>/today</code> &mdash; бот отвечает, привычки на месте:</p>
+
+<pre><code>  Аня: /today
+  Бот: Мои привычки на сегодня
+       текущая дата
+
+       Выполнено: 0 из 2
+
+       [ ⬜ Растяжка ]
+       [ ⬜ Чтение ]</code></pre>
+
+<h3>Авария 3. Ошибка в коде</h3>
+
+<p>Самая частая авария &mdash; ваша собственная. Допустим, при обновлении в <code>bot.py</code> попала опечатка: <code>import reminder</code> вместо <code>import reminders</code>. Мы сделали такую опечатку и перезапустили службу. Статус:</p>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: activating (auto-restart) (Result: exit-code) since Sun 2026-11-01 16:28:25 UTC; 3s ago
+    Process: 798 ExecStart=/home/bot/habit_bot/.venv/bin/python bot.py (code=exited, status=1/FAILURE)
+   Main PID: 798 (code=exited, status=1/FAILURE)
+        CPU: 2.765s</code></pre>
+
+<p><code>activating (auto-restart)</code> &mdash; systemd ждёт <code>RestartSec</code>, чтобы попробовать снова. <code>status=1/FAILURE</code> &mdash; бот завершился с ошибкой. Какой &mdash; смотрим в журнале:</p>
+
+<pre><code>journalctl -u habitbot -n 12</code></pre>
+
+<pre><code>Nov 01 16:28:17 vm systemd[1]: habitbot.service: Main process exited, code=exited, status=1/FAILURE
+Nov 01 16:28:17 vm systemd[1]: habitbot.service: Failed with result 'exit-code'.
+Nov 01 16:28:17 vm systemd[1]: habitbot.service: Consumed 2.879s CPU time.
+Nov 01 16:28:22 vm systemd[1]: habitbot.service: Scheduled restart job, restart counter is at 1.
+Nov 01 16:28:22 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:28:24 vm python[798]: Traceback (most recent call last):
+Nov 01 16:28:24 vm python[798]:   File "/home/bot/habit_bot/bot.py", line 9, in &lt;module&gt;
+Nov 01 16:28:24 vm python[798]:     import reminder
+Nov 01 16:28:24 vm python[798]: ModuleNotFoundError: No module named 'reminder'
+Nov 01 16:28:25 vm systemd[1]: habitbot.service: Main process exited, code=exited, status=1/FAILURE
+Nov 01 16:28:25 vm systemd[1]: habitbot.service: Failed with result 'exit-code'.
+Nov 01 16:28:25 vm systemd[1]: habitbot.service: Consumed 2.765s CPU time.</code></pre>
+
+<p>Видно всё: бот упал с <code>ModuleNotFoundError</code>, systemd выждал пять секунд, запустил снова, бот снова упал. Так будет повторяться, пока ошибку не исправят: перезапуск не чинит код, он только даёт ещё попытку. Зато в журнале всегда виден traceback &mdash; читаем его снизу вверх, как в уроке 1.2.</p>
+
+<p>Мы исправили опечатку и перезапустили:</p>
+
+<pre><code>● habitbot.service - ПривычкаБот
+     Loaded: loaded (/etc/systemd/system/habitbot.service; enabled; preset: enabled)
+     Active: active (running) since Sun 2026-11-01 16:28:28 UTC; 4s ago
+   Main PID: 804 (python)
+        CPU: 2.469s
+     CGroup: /system.slice/habitbot.service
+             └─804 /home/bot/habit_bot/.venv/bin/python bot.py
+
+Nov 01 16:28:28 vm systemd[1]: Started habitbot.service - ПривычкаБот.
+Nov 01 16:28:31 vm python[804]: ПривычкаБот запущен. Ctrl+C для остановки.</code></pre>
+
+<h3>И ошибка в настройке</h3>
+
+<p>Ответ на вопрос из раздела 2. Мы убрали <code>WorkingDirectory</code> и указали в <code>ExecStart</code> полный путь к <code>bot.py</code>. Конец журнала:</p>
+
+<pre><code>Nov 01 16:28:36 vm python[838]:              ^^^^^^^^^^
+Nov 01 16:28:36 vm python[838]:   File "/home/bot/habit_bot/.venv/lib/python3.12/site-packages/aiosqlite/core.py", line 466, in connector
+Nov 01 16:28:36 vm python[838]:     return sqlite3.connect(loc, **kwargs)
+Nov 01 16:28:36 vm python[838]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Nov 01 16:28:36 vm python[838]: sqlite3.OperationalError: unable to open database file
+Nov 01 16:28:37 vm systemd[1]: habitbot.service: Main process exited, code=exited, status=1/FAILURE
+Nov 01 16:28:37 vm systemd[1]: habitbot.service: Failed with result 'exit-code'.
+Nov 01 16:28:37 vm systemd[1]: habitbot.service: Consumed 3.494s CPU time.</code></pre>
+
+<p>Служба запустилась в корне диска, и бот не смог создать там базу. Верните <code>WorkingDirectory</code>, если экспериментировали, и не забудьте <code>daemon-reload</code>.</p>
+
+<blockquote><strong>🔑 systemd поднимает бота, но не чинит:</strong><br />
+Убитый процесс и перезагрузка сервера бота больше не останавливают. Ошибка в коде приводит к перезапуску по кругу &mdash; причина видна в <code>journalctl -u habitbot</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 11 · text · новый шаг ═══ -->
+
+<h2>🔄 6. Обновляем бота</h2>
+
+<p>Вы исправили что-то в коде дома и хотите, чтобы изменение заработало на сервере. Пусть это будет текст ответа на неизвестную команду. Дома в <code>texts.py</code>:</p>
+
+<pre><code>grep UNKNOWN_COMMAND habit_bot/texts.py</code></pre>
+
+<pre><code>UNKNOWN_COMMAND = "Не знаю такой команды. Все команды &mdash; в /menu"</code></pre>
+
+<h3>Шаг 1. Упаковать без данных</h3>
+
+<p>Архив собираем почти как в уроке 9.2, но с двумя новыми исключениями. <strong>На вашем компьютере</strong>:</p>
+
+<pre><code>tar -czf habit_bot.tar.gz --exclude=.venv --exclude=__pycache__ --exclude=habits.db --exclude=.env habit_bot</code></pre>
+
+<p>Почему теперь исключаем <code>habits.db</code> и <code>.env</code>? С переезда прошло время. На сервере Аня отмечала привычки, Борис сменил город &mdash; база на сервере новее домашней. Если домашний <code>habits.db</code> попадёт в архив, при распаковке он перезапишет серверный, и всё, что пользователи сделали после переезда, пропадёт. <code>.env</code> на сервере уже есть, и токен там свой &mdash; возможно, не тот, что дома (урок 9.2, второй бот для опытов).</p>
+
+<p>Проверьте, что в архиве нет лишнего:</p>
+
+<pre><code>tar -tzf habit_bot.tar.gz | sort</code></pre>
+
+<pre><code>habit_bot/
+habit_bot/bot.py
+habit_bot/clock.py
+habit_bot/config.py
+habit_bot/database.py
+habit_bot/handlers/
+habit_bot/handlers/__init__.py
+habit_bot/handlers/add.py
+habit_bot/handlers/common.py
+habit_bot/handlers/fallback.py
+habit_bot/handlers/guard.py
+habit_bot/handlers/habits.py
+habit_bot/keyboards.py
+habit_bot/reminders.py
+habit_bot/requirements.txt
+habit_bot/states.py
+habit_bot/streak.py
+habit_bot/texts.py
+habit_bot/validators.py
+habit_bot/weather.py</code></pre>
+
+<p>Только код и <code>requirements.txt</code>.</p>
+
+<h3>Шаг 2. Отправить и распаковать</h3>
+
+<pre><code>scp habit_bot.tar.gz bot@203.0.113.10:~</code></pre>
+
+<p><strong>На сервере под <code>bot</code></strong>:</p>
+
+<pre><code>tar -xzf habit_bot.tar.gz</code></pre>
+
+<p>Распаковка заменит файлы с кодом новыми, а <code>habits.db</code> и <code>.env</code> не тронет: их нет в архиве. Проверим, что текст обновился, а база осталась прежней:</p>
+
+<pre><code>grep UNKNOWN_COMMAND habit_bot/texts.py</code></pre>
+
+<pre><code>UNKNOWN_COMMAND = "Не знаю такой команды. Все команды &mdash; в /menu"</code></pre>
+
+<pre><code>ls -l habit_bot/habits.db</code></pre>
+
+<pre><code>-rw-r--r-- 1 bot bot 32768 Nov  1 16:03 habit_bot/habits.db</code></pre>
+
+<p>Дата базы &mdash; старая: её никто не перезаписал.</p>
+
+<h3>Шаг 3. Перезапустить</h3>
+
+<p>Бот всё ещё работает со старым кодом: Python прочитал файлы при запуске. <strong>Под <code>root</code></strong>:</p>
+
+<pre><code>systemctl restart habitbot</code></pre>
+
+<p>Аня отправляет <code>/hello</code>, а потом <code>/today</code>:</p>
+
+<pre><code>  Аня: /hello
+  Бот: Не знаю такой команды. Все команды &mdash; в /menu
+  Аня: /today
+  Бот: Мои привычки на сегодня
+       текущая дата
+
+       Выполнено: 0 из 2
+
+       [ ⬜ Растяжка ]
+       [ ⬜ Чтение ]</code></pre>
+
+<p>Новый текст, прежние привычки.</p>
+
+<h3>Если изменились библиотеки</h3>
+
+<p>Если дома вы поставили новую библиотеку и обновили <code>requirements.txt</code>, на сервере перед перезапуском поставьте её. <strong>Под <code>bot</code></strong>:</p>
+
+<pre><code>cd ~/habit_bot
+source .venv/bin/activate
+python -m pip install -r requirements.txt</code></pre>
+
+<p>Потом <code>systemctl restart habitbot</code> под <code>root</code>.</p>
+
+<blockquote><strong>💡 Если проект на GitHub:</strong><br />
+Вместо архива можно один раз склонировать репозиторий на сервер и обновлять код командой <code>git pull</code> в папке проекта. <code>habits.db</code> и <code>.env</code> тогда должны быть в <code>.gitignore</code> &mdash; по тем же причинам, по которым мы исключили их из архива. После <code>git pull</code> &mdash; так же <code>systemctl restart habitbot</code>.</blockquote>
+
+<blockquote><strong>🔑 Обновление &mdash; код без данных, потом restart:</strong><br />
+В архив обновления не кладём <code>habits.db</code> и <code>.env</code>. После распаковки &mdash; <code>pip install -r requirements.txt</code>, если менялись библиотеки, и <code>systemctl restart habitbot</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 12 · text · новый шаг ═══ -->
+
+<h2>🔧 7. Если что-то не сошлось</h2>
+
+<p>Каждый симптом мы получили на стенде.</p>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Симптом</th>
+			<th>Где искать</th>
+		</tr>
+		<tr>
+			<td><code>Unit habitbot.service could not be found</code></td>
+			<td>Файл лежит не в <code>/etc/systemd/system/</code>, назван иначе, или не выполнен <code>daemon-reload</code></td>
+		</tr>
+		<tr>
+			<td>Изменения в unit-файле не действуют</td>
+			<td>После правки нужны <code>systemctl daemon-reload</code> и <code>restart</code></td>
+		</tr>
+		<tr>
+			<td><code>activating (auto-restart)</code>, <code>status=1/FAILURE</code></td>
+			<td>Бот падает при старте. Причина &mdash; traceback в <code>journalctl -u habitbot -n 30</code></td>
+		</tr>
+		<tr>
+			<td><code>sqlite3.OperationalError: unable to open database file</code></td>
+			<td>Нет <code>WorkingDirectory=/home/bot/habit_bot</code></td>
+		</tr>
+		<tr>
+			<td><code>ModuleNotFoundError: No module named 'aiogram'</code></td>
+			<td>В <code>ExecStart</code> системный Python, а не <code>/home/bot/habit_bot/.venv/bin/python</code></td>
+		</tr>
+		<tr>
+			<td>Бот работает, а в журнале нет строк от <code>print()</code></td>
+			<td>Нет <code>Environment=PYTHONUNBUFFERED=1</code></td>
+		</tr>
+		<tr>
+			<td>После перезагрузки бот не запустился, <code>Loaded: ... disabled</code></td>
+			<td>Не выполнен <code>systemctl enable habitbot</code></td>
+		</tr>
+		<tr>
+			<td>Бот остановился и не поднимается, <code>status=0/SUCCESS</code></td>
+			<td>Его завершили сигналом <code>SIGTERM</code>; <code>on-failure</code> такой выход не перезапускает. <code>systemctl start habitbot</code></td>
+		</tr>
+		<tr>
+			<td>После обновления пропали отметки пользователей</td>
+			<td>В архив попал домашний <code>habits.db</code>: нужен <code>--exclude=habits.db</code></td>
+		</tr>
+		<tr>
+			<td>После обновления бот отвечает по-старому</td>
+			<td>Не выполнен <code>systemctl restart habitbot</code></td>
+		</tr>
+		<tr>
+			<td><code>TelegramConflictError</code> в журнале</td>
+			<td>Вторая копия бота: дома или запущенная руками в SSH-сессии (урок 9.2)</td>
+		</tr>
+	</tbody>
+</table>
+<!-- АВТОР: строки &laquo;could not be found&raquo; и &laquo;системный Python в ExecStart&raquo; &mdash; типовые ошибки, на стенде отдельно не воспроизводились -->
+
+
+<!-- ═══ ШАГ 13 · text · новый шаг ═══ -->
+
+<h2>📋 Итог урока 9.3</h2>
+
+<p>ПривычкаБот &mdash; служба сервера. Он запускается при загрузке, поднимается после сбоя, не зависит от того, открыт ли терминал, а всё, что он печатает, сохраняется в журнале.</p>
+
+<ul>
+	<li>✅ Unit-файл <code>/etc/systemd/system/habitbot.service</code> описывает, что запускать, откуда, от чьего имени и что делать при сбое</li>
+	<li>✅ <code>WorkingDirectory</code> &mdash; папка проекта: от неё считается путь к <code>habits.db</code></li>
+	<li>✅ <code>ExecStart</code> &mdash; полный путь к Python из <code>.venv</code>; активировать окружение не нужно</li>
+	<li>✅ <code>User=bot</code> &mdash; бот не работает под <code>root</code></li>
+	<li>✅ <code>Restart=on-failure</code> поднимает бота после ошибки и убийства процесса; выход с кодом 0 не перезапускает</li>
+	<li>✅ <code>enable</code> &mdash; автозапуск при загрузке; <code>daemon-reload</code> &mdash; после каждой правки файла</li>
+	<li>✅ Вывод бота &mdash; в <code>journalctl -u habitbot</code>; <code>PYTHONUNBUFFERED=1</code>, чтобы <code>print()</code> не застревал</li>
+	<li>✅ Обновление: архив без <code>habits.db</code> и <code>.env</code>, распаковка, <code>restart</code></li>
+</ul>
+
+<h3>📝 Шпаргалка</h3>
+
+<p>Итоговый unit-файл:</p>
+
+<pre><code>[Unit]
+Description=ПривычкаБот
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bot
+WorkingDirectory=/home/bot/habit_bot
+ExecStart=/home/bot/habit_bot/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Команда (под root)</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td><code>systemctl daemon-reload</code></td>
+			<td>Перечитать unit-файлы</td>
+		</tr>
+		<tr>
+			<td><code>systemctl enable --now habitbot</code></td>
+			<td>Включить автозапуск и запустить</td>
+		</tr>
+		<tr>
+			<td><code>systemctl status habitbot</code></td>
+			<td>Состояние и последние строки журнала</td>
+		</tr>
+		<tr>
+			<td><code>systemctl restart habitbot</code></td>
+			<td>Перезапустить после обновления</td>
+		</tr>
+		<tr>
+			<td><code>systemctl stop habitbot</code></td>
+			<td>Остановить</td>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot -f</code></td>
+			<td>Журнал в реальном времени</td>
+		</tr>
+		<tr>
+			<td><code>journalctl -u habitbot -n 50</code></td>
+			<td>Последние 50 строк журнала</td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>⚠️ Что пока остаётся учебным:</strong><br />
+systemd поднимает упавшего бота целиком. Но если внутри работающего бота умрёт задача напоминаний (урок 9.1), процесс продолжит жить и отвечать на команды &mdash; systemd ничего не заметит, а напоминания перестанут приходить. И если хэндлер упадёт на чьём-то сообщении, пользователь не получит ответа, а в журнале останется traceback без подробностей: кто писал и что.</blockquote>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>systemd следит за процессом снаружи: жив он или нет. Но бот может быть жив и при этом сломан изнутри: молча потерять фоновую задачу или промолчать в ответ на сообщение.</p>
+
+<p>В уроке 9.4 научим бота не падать изнутри: настроим журнал со временем и уровнями, добавим обработчик ошибок aiogram, который отвечает пользователю и записывает подробности, и защитим цикл напоминаний, чтобы одна ошибка не останавливала его навсегда.</p>
