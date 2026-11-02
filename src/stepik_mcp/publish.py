@@ -26,6 +26,10 @@ Stepik не сдвигает следующие шаги, когда шаг со
 
 plan_rollback строит такой же план возврата шагов к снимку из snapshots/: изменённые
 шаги восстанавливаются, удалённые создаются заново (с новым id).
+
+plan_create_lesson строит план создания нового урока из локального черновика: apply_push
+создаёт пустой урок, привязывает его к модулю и записывает ID в черновик; шаги черновика
+публикуются затем обычным plan_push.
 """
 
 import difflib
@@ -42,7 +46,8 @@ from . import steps
 from .client import StepikError
 from .solution import run_solution
 from .render import html_to_md, md_to_html, render_step
-from .workspace import _atomic_write, _inside, load_step_source, save_step_sources
+from .workspace import (_atomic_write, _inside, course_structure, load_step_source, merge_structure,
+                        save_index, save_step_sources)
 
 IMAGE_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -748,6 +753,8 @@ def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=No
         raise StepikError("План уже применён. Для новых правок постройте новый план", status=409)
     if plan["course_id"] != course_id:
         raise StepikError("План относится к другому курсу", status=400)
+    if plan.get("kind") == "create_lesson":
+        return _apply_create_lesson(client, folder, plan_path, plan)
     needed = {op["step_id"] for op in plan["operations"] if op.get("confirm")}
     missing = sorted(needed - set(confirm_steps or []))
     if missing:
@@ -902,5 +909,142 @@ def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=No
                     + (" Восстановленные шаги получили новые id: скачайте урок заново." if any(
                         op["op"] == "recreate" for op in plan["operations"]) else ""),
         }
+    finally:
+        lock.rmdir()
+
+
+# --------------------------------------------------------------------------
+# Новый урок из черновика
+# --------------------------------------------------------------------------
+
+def _draft_title(text):
+    title = _frontmatter_value(text, "title")
+    if isinstance(title, str) and title.strip():
+        return title.strip()
+    match = re.search(r"(?m)^# +(.+?)\s*$", text)
+    return match[1].strip() if match else None
+
+
+def plan_create_lesson(client, course_id, draft_path, module_position, lesson_position=None):
+    """План создания урока из локального черновика. Ничего не отправляет.
+
+    Черновик — Markdown в папке курса, ещё не связанный с уроком Stepik: название
+    во frontmatter title: или в заголовке «# ...», шаги — метки <!-- new_step -->.
+    После применения шаги публикуются обычным plan_push.
+    """
+    _check_allowed(client, course_id)
+    folder = _course_folder(course_id)
+    path = _inside(folder, draft_path)
+    if path.suffix != ".md" or not path.is_file():
+        raise StepikError("Черновик должен быть существующим .md файлом в папке курса", status=400)
+    relative = path.relative_to(folder).as_posix()
+    manifest = json.loads(_inside(folder, ".course.json").read_text(encoding="utf-8"))
+    if any(item["path"] == relative for item in manifest["lessons"].values()):
+        raise StepikError("Этот файл уже связан с уроком Stepik; для правок используйте stepik_plan_push", status=409)
+    data = path.read_bytes()
+    text = data.decode("utf-8")
+    if _frontmatter_value(text, "lesson_id") is not None:
+        raise StepikError("В черновике уже есть lesson_id: это не новый урок", status=409)
+    title = _draft_title(text)
+    if not title:
+        raise StepikError("У черновика нет названия: добавьте title: во frontmatter или строку «# Название»",
+                          status=400)
+    entries = parse_lesson(text)
+    if any(entry["step_id"] for entry in entries):
+        raise StepikError("В черновике есть метки step_id других уроков; у нового урока шаги — <!-- new_step -->",
+                          status=400)
+
+    course = client.by_ids("courses", [course_id])
+    sections = client.by_ids("sections", course[0].get("sections") or []) if course else []
+    section = next((row for row in sections if row.get("position") == module_position), None)
+    if section is None:
+        raise StepikError(f"В курсе {course_id} нет модуля {module_position}", status=404)
+    units = section.get("units") or []
+    position = len(units) + 1 if lesson_position is None else lesson_position
+    if type(position) is not int or not 1 <= position <= len(units) + 1:
+        raise StepikError(f"Позиция урока в модуле {module_position}: от 1 до {len(units) + 1}", status=400)
+
+    plan_id = _now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+    plans = _inside(folder, ".stepik/plans")
+    plans.mkdir(parents=True, exist_ok=True)
+    plan = {
+        "version": 1, "plan_id": plan_id, "kind": "create_lesson", "created_at": _now().isoformat(),
+        "course_id": course_id, "lesson_path": relative, "file_sha256": _sha(data), "title": title,
+        "section_id": section["id"], "module_position": module_position, "position": position,
+        "section_units": units, "operations": [],
+    }
+    _atomic_write(_inside(plans, f"{plan_id}.json"), json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+    return {
+        "status": "planned", "plan_id": plan_id, "course_id": course_id, "kind": "create_lesson",
+        "title": title, "module": f"{module_position}. {section.get('title', '')}",
+        "lesson_position": f"{module_position}.{position}", "draft": relative,
+        "new_steps_in_draft": sum(1 for entry in entries if entry["body"]),
+        "note": "На Stepik ничего не отправлено. После подтверждения автора stepik_apply_push создаст пустой урок, "
+                "привяжет его к модулю и запишет ID в черновик. Шаги затем публикуются через stepik_plan_push."
+                + (" Урок встанет в середину модуля: номера следующих уроков сдвинутся."
+                   if position <= len(units) else ""),
+    }
+
+
+def _apply_create_lesson(client, folder, plan_path, plan):
+    path = _inside(folder, plan["lesson_path"])
+    data = path.read_bytes()
+    if _sha(data) != plan["file_sha256"]:
+        raise StepikError("LOCAL_CHANGED: черновик изменился после плана. Постройте новый план", status=409)
+    sections = client.by_ids("sections", [plan["section_id"]])
+    if not sections or (sections[0].get("units") or []) != plan["section_units"]:
+        raise StepikError("REMOTE_CHANGED: уроки модуля изменились на Stepik после плана. Постройте новый план",
+                          status=409)
+    course_id = plan["course_id"]
+    lock = _inside(folder, ".stepik-cache.lock")
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        raise StepikError("Папка курса занята другой операцией (.stepik-cache.lock)") from None
+    try:
+        lesson = client.post("lessons", {"lesson": {"title": plan["title"]}})["lessons"][0]
+        _log(folder, course_id=course_id, lesson_id=lesson["id"], operation="create_lesson", result="ok")
+        unit = client.post("units", {"unit": {"section": plan["section_id"], "lesson": lesson["id"],
+                                              "position": plan["position"]}})["units"][0]
+        _log(folder, course_id=course_id, lesson_id=lesson["id"], unit_id=unit["id"], operation="create_unit",
+             section_id=plan["section_id"], position=plan["position"], result="ok")
+
+        snapshots = _inside(folder, "snapshots")
+        snapshots.mkdir(exist_ok=True)
+        stamp = _now().strftime("%Y%m%dT%H%M%S%fZ")
+        _atomic_write(_inside(snapshots, f"{path.stem}.draft-{stamp}.md"), data.decode("utf-8"))
+
+        old = json.loads(_inside(folder, ".course.json").read_text(encoding="utf-8"))
+        manifest, _, _ = merge_structure(old, course_structure(client, course_id))
+        key = next((key for key, item in manifest["lessons"].items() if item["lesson_id"] == lesson["id"]), None)
+        if key is None:
+            raise StepikError("Урок создан, но не найден в структуре курса; проверьте модуль на Stepik")
+        text = data.decode("utf-8").replace("\r\n", "\n")
+        if text.startswith("---\n") and "\n---" in text[4:]:
+            text = text[4:].split("\n---", 1)[1].lstrip("\n")  # прежний frontmatter черновика заменяется
+        fetched_at = _now().isoformat()
+        metadata = {
+            "course_id": course_id, "lesson_id": lesson["id"], "unit_id": unit["id"], "position": key,
+            "title": plan["title"], "source_url": f"{client.base_url}/lesson/{lesson['id']}",
+            "fetched_at": fetched_at, "status": "working_copy", "format": steps.FORMAT,
+        }
+        head = ["---"] + [f"{name}: {json.dumps(value, ensure_ascii=False)}" for name, value in metadata.items()]
+        _atomic_write(path, "\n".join(head + ["---", "", text]), replace=True)
+        manifest["lessons"][key].update(path=plan["lesson_path"], title=plan["title"], step_count=0,
+                                        fetched_at=fetched_at)
+        save_index(folder, manifest)
+        plan["applied_at"] = _now().isoformat()
+        plan["lesson_id"] = lesson["id"]
+        _atomic_write(plan_path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n", replace=True)
+        expected = f"{plan['module_position']}.{plan['position']}"
+        return {
+            "status": "applied", "kind": "create_lesson", "lesson_id": lesson["id"], "unit_id": unit["id"],
+            "lesson_position": key, "path": str(path),
+            **({} if key == expected else {"warning": f"Stepik поставил урок на позицию {key}, а не {expected}"}),
+            "note": f"Урок создан. Шаги черновика публикуются через stepik_plan_push(lesson_position=\"{key}\").",
+        }
+    except StepikError as exc:
+        _log(folder, course_id=course_id, operation="create_lesson", result="error", error=str(exc))
+        raise
     finally:
         lock.rmdir()

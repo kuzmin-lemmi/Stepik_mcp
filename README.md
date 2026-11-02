@@ -171,6 +171,7 @@ claude mcp add stepik --scope user -e STEPIK_CLIENT_ID=<client_id> -e STEPIK_CLI
 | `stepik_cache_lesson_comments` | Сохранить комментарии рядом с уроком | ✅ |
 | `stepik_cache_course_text_lessons` | Сохранить текстовые шаги всех уроков курса | ✅ |
 | `stepik_pull_course` | Скачать весь курс: все уроки со всеми шагами и описание курса; новые уроки добавляются в структуру | ✅ |
+| `stepik_plan_create_lesson` | План создания нового урока из локального черновика; применяется `stepik_apply_push` | ✅ (не проверен на Stepik) |
 | `stepik_refresh_lesson` | Подтянуть изменения урока со Stepik, не затирая правки автора; конфликты — отдельным файлом | ✅ |
 | **Публикация** | | |
 | `stepik_plan_push` | План и diff публикации урока (текст, тесты, задачи на код), ничего не отправляет | ✅ |

@@ -195,8 +195,23 @@ def stepik_rollback_lesson(course_id: int, lesson_position: str, snapshot: str =
 
 
 @mcp.tool(
-    description="Публикует на Stepik план из stepik_plan_push или stepik_rollback_lesson: загружает картинки, "
-    "меняет, добавляет или восстанавливает шаги. Вызывать только после того, как автор увидел diff и явно "
+    description="План создания нового урока на Stepik из локального черновика. Ничего не отправляет. "
+    "draft_path — путь к .md от папки курса (например «02-Модуль-123/новый-урок.md»); название — title: во "
+    "frontmatter или строка «# Название»; шаги — метки <!-- new_step -->. module_position — номер модуля, "
+    "lesson_position — место урока в модуле (по умолчанию в конец). Применяется stepik_apply_push после "
+    "подтверждения автора: создаётся пустой урок, привязывается к модулю, ID записываются в черновик и "
+    ".course.json. Шаги затем публикуются через stepik_plan_push. Только для курсов из ALLOWED_WRITE_COURSES.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_create_lesson(course_id: int, draft_path: str, module_position: int,
+                              lesson_position: int | None = None) -> str:
+    return _run(lambda: json.dumps(publish.plan_create_lesson(CLIENT, course_id, draft_path, module_position,
+                                                              lesson_position), ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Публикует на Stepik план из stepik_plan_push, stepik_rollback_lesson или "
+    "stepik_plan_create_lesson: загружает картинки, меняет, добавляет или восстанавливает шаги, создаёт урок. Вызывать только после того, как автор увидел diff и явно "
     "подтвердил публикацию. confirm_steps — step_id из плана, которые уже решали ученики; передавайте их, только "
     "если автор согласился изменить именно эти шаги. confirm_delete — ровно те step_id, которые план удаляет; "
     "передавайте их, только если автор подтвердил удаление. Перед записью проверяет, что файл и урок на Stepik не "

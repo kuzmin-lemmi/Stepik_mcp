@@ -114,7 +114,7 @@ def _objects(client, endpoint, ids):
     return rows
 
 
-def _course_structure(client, course_id):
+def course_structure(client, course_id):
     course = _objects(client, "courses", [course_id])[course_id]
     section_ids = course.get("sections")
     if not isinstance(section_ids, list):
@@ -162,7 +162,7 @@ def _course_structure(client, course_id):
     return manifest
 
 
-def _save_index(folder, manifest):
+def save_index(folder, manifest):
     lines = [f"# {manifest['title']}", "", f"Course ID: {manifest['course_id']}",
              "", "Local structure snapshot. Generated file; do not edit manually.",
              "Local files are working copies, not automatically refreshed from Stepik.", ""]
@@ -220,10 +220,10 @@ def _save_lesson(client, folder, manifest, course_id, lesson_position, destinati
     item.update(title=lesson.get("title", ""), step_count=len(step_ids), fetched_at=fetched_at,
                 source_update_date=lesson.get("update_date"),
                 imported_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
-    _save_index(folder, manifest)
+    save_index(folder, manifest)
     save_step_sources(folder, [sources[sid] for sid in step_ids])
     _atomic_write(destination, text)
-    _save_index(folder, manifest)
+    save_index(folder, manifest)
     return lesson, step_ids
 
 
@@ -260,7 +260,7 @@ def cache_lesson(client, course_id, lesson_position):
             # Do not adopt an unrelated folder or overwrite an orphaned managed index.
             if any(path != lock and path.name not in SERVICE_ENTRIES for path in folder.iterdir()):
                 raise StepikError("Course folder is not empty but has no .course.json; manual inspection required")
-            manifest = _course_structure(client, course_id)
+            manifest = course_structure(client, course_id)
         item = manifest["lessons"].get(lesson_position)
         if item is None:
             raise StepikError("Lesson is absent from the course structure snapshot. Automatic structure refresh is not implemented.", status=404)
@@ -276,7 +276,7 @@ def cache_lesson(client, course_id, lesson_position):
         if not instructions.exists():
             _atomic_write(instructions, COURSE_INSTRUCTIONS)
         # Repair generated indexes even on a cache hit after an interrupted save.
-        _save_index(folder, manifest)
+        save_index(folder, manifest)
         if destination.exists():
             if not destination.is_file():
                 raise StepikError("Lesson path exists but is not a file")
@@ -394,14 +394,14 @@ def cache_course_text_lessons(client, course_id):
         else:
             if any(path != lock and path.name not in SERVICE_ENTRIES for path in folder.iterdir()):
                 raise StepikError("Course folder is not empty but has no .course.json; manual inspection required")
-            manifest = _course_structure(client, course_id)
+            manifest = course_structure(client, course_id)
 
         for module in manifest["modules"]:
             _inside(folder, module["path"]).mkdir(exist_ok=True)
         instructions = _inside(folder, "AGENTS.md")
         if not instructions.exists():
             _atomic_write(instructions, COURSE_INSTRUCTIONS)
-        _save_index(folder, manifest)
+        save_index(folder, manifest)
 
         saved = []
         existing = []
@@ -453,10 +453,10 @@ def cache_course_text_lessons(client, course_id):
             item.update(title=lesson.get("title", ""), source_step_count=len(step_ids),
                         text_step_count=len(text_sources), content_mode="text_only", fetched_at=fetched_at,
                         imported_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
-            _save_index(folder, manifest)
+            save_index(folder, manifest)
             save_step_sources(folder, text_sources)
             _atomic_write(destination, text)
-            _save_index(folder, manifest)
+            save_index(folder, manifest)
             saved.append({"position": position, "lesson_id": lesson_id, "path": str(destination),
                           "source_step_count": len(step_ids), "text_step_count": len(text_sources)})
             total_text_steps += len(text_sources)
@@ -500,7 +500,7 @@ def _course_info(client, course):
     return "\n".join(lines) + "\n"
 
 
-def _merge_structure(old, new):
+def merge_structure(old, new):
     """Новая структура курса, где у уже известных уроков и модулей остаются прежние пути и сведения."""
     old_modules = {module["section_id"]: module["path"] for module in old["modules"]}
     old_lessons = {item["lesson_id"]: (key, item) for key, item in old["lessons"].items()}
@@ -535,14 +535,14 @@ def pull_course(client, course_id):
         raise StepikError("Course cache is busy. If a process crashed, inspect .stepik-cache.lock before removing it.") from None
     try:
         index = _inside(folder, ".course.json")
-        fresh = _course_structure(client, course_id)
+        fresh = course_structure(client, course_id)
         removed, moved = [], []
         if index.exists():
             try:
                 old = json.loads(index.read_text(encoding="utf-8"))
                 if old["version"] != 1 or old["course_id"] != course_id:
                     raise ValueError("version or course ID mismatch")
-                manifest, removed, moved = _merge_structure(old, fresh)
+                manifest, removed, moved = merge_structure(old, fresh)
             except (ValueError, KeyError, TypeError) as exc:
                 raise StepikError("Invalid .course.json; existing files were not overwritten") from exc
         else:
@@ -556,7 +556,7 @@ def pull_course(client, course_id):
         instructions = _inside(folder, "AGENTS.md")
         if not instructions.exists():
             _atomic_write(instructions, COURSE_INSTRUCTIONS)
-        _save_index(folder, manifest)
+        save_index(folder, manifest)
 
         info = _inside(folder, "COURSE_INFO.md")
         info_status = "existing"
