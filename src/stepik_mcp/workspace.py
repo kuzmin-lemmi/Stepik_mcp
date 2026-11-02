@@ -25,6 +25,7 @@ Do not call stepik_lesson_bundle by default.
 Publish only via stepik_plan_push, then show the diff and call stepik_apply_push after explicit author approval.
 Preserve step IDs and metadata when editing. Never overwrite local work from Stepik.
 Task settings live in the ```yaml stepik block at the end of a step; edit values, keep the fence and type.
+Lessons downloaded by an older server version: run stepik_upgrade_lesson before editing.
 .stepik/steps/*.json are Stepik originals used as the base for diffs; do not edit them.
 Course structure and lesson positions are a local snapshot, not a live synchronization.
 COURSE_MAP.md and .course.json are managed by the loader; do not edit them manually.

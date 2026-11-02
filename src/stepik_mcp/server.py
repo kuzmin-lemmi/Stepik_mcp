@@ -168,6 +168,18 @@ def stepik_pull_course(course_id: int) -> str:
 
 
 @mcp.tool(
+    description="Переводит локальный файл урока, скачанный старой версией сервера, в текущий формат (сохраняет "
+    "стили блоков кода, таблицы, спойлеры, ссылки). Нетронутые шаги записываются заново; правки автора переносятся "
+    "на новую запись шага (EDITED_MERGED), если не пересекаются со строками, которые меняет формат; иначе шаг "
+    "попадает в conflicts и ничего не записывается. Без apply=True только показывает результат. С apply=True прежний "
+    "файл сохраняется в snapshots/. Stepik нужен только для шагов без исходника (файлы формата 1), только GET.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
+)
+def stepik_upgrade_lesson(course_id: int, lesson_position: str, apply: bool = False) -> str:
+    return _local(refresh.upgrade_lesson, course_id, lesson_position, apply)
+
+
+@mcp.tool(
     description="Обновляет локальный файл урока со Stepik, не затирая правки автора. Шаг, изменённый только на "
     "Stepik, заменяется новой версией; изменённый только в файле — остаётся; изменённый и там, и там — конфликт: "
     "файл в этом шаге не меняется, версия Stepik сохраняется рядом в <урок>.stepik-<время>.md. Новые шаги Stepik "
