@@ -98,6 +98,27 @@ class DeleteCommentsTests(unittest.TestCase):
         with self.assertRaisesRegex(StepikError, "Нужен фильтр"):
             moderation.plan_delete_comments(self.client, 1)
 
+    def test_all_in_lesson_takes_every_author_replies_and_empty_text(self):
+        self.data["comments"] += [
+            {"id": 7, "user": 8, "target": 12, "text": "<p>ответ</p>", "reply_count": 0, "parent": 3},
+            {"id": 8, "user": 9, "target": 11, "text": '<p><img src="https://x/1.png"></p>', "reply_count": 0},
+        ]
+        plan = moderation.plan_delete_comments(self.client, 1, lesson_position="2.1", all_in_lesson=True)
+        self.assertEqual(plan["confirm_count"], 6)
+        self.assertEqual(plan["skipped_count"], 0)
+        self.assertEqual(plan["by_lesson"], {"2.1": 6})
+        self.assertEqual(plan["by_user"], {ME: 3, 8: 2, 9: 1})
+        self.assertIn("всех авторов", plan["warning"])
+        result = moderation.apply_delete_comments(self.client, 1, plan["plan_id"], 6)
+        self.assertEqual((result["status"], result["deleted"]), ("deleted", 6))
+        order = [int(call.args[0].rsplit("/", 1)[1]) for call in self.client.delete.call_args_list]
+        self.assertLess(order.index(7), order.index(3))  # сначала ответы, потом корень ветки
+        self.assertNotIn(2, order)  # другой урок не тронут
+
+    def test_all_in_lesson_requires_lesson(self):
+        with self.assertRaisesRegex(StepikError, "lesson_position"):
+            moderation.plan_delete_comments(self.client, 1, all_in_lesson=True)
+
     def test_course_outside_allowlist(self):
         with patch.dict(os.environ, {"ALLOWED_WRITE_COURSES": "2"}), self.assertRaisesRegex(StepikError, "WRITE_NOT_ALLOWED"):
             moderation.plan_delete_comments(self.client, 1, text="!")

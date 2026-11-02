@@ -185,18 +185,21 @@ def stepik_apply_push(course_id: int, plan_id: str, confirm_steps: list[int] | N
 
 
 @mcp.tool(
-    description="План удаления комментариев под шагами курса. Ничего не удаляет. Фильтр обязателен: text — весь "
+    description="План удаления комментариев под шагами курса. Ничего не удаляет. Фильтр обязателен (кроме all_in_lesson): text — весь "
     "текст комментария без HTML (например «!»), или contains — часть текста. По умолчанию только комментарии "
     "аккаунта токена (user_id — другой пользователь) и только без ответов (include_replied=True — с ответами). "
-    "lesson_position (вид 6.2) ограничивает урок. Возвращает plan_id, число комментариев (confirm_count), "
-    "разбивку по урокам, примеры и путь к полному списку. Покажите автору до stepik_apply_delete_comments.",
+    "lesson_position (вид 6.2) ограничивает урок. all_in_lesson=True с lesson_position — все комментарии урока: "
+    "любых авторов, включая учеников, с ответами и без фильтра по тексту. Возвращает plan_id, число комментариев "
+    "(confirm_count), разбивку по урокам и авторам, примеры и путь к полному списку. Покажите автору до "
+    "stepik_apply_delete_comments.",
     annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
 )
 def stepik_plan_delete_comments(course_id: int, text: str | None = None, contains: str | None = None,
                                 lesson_position: str | None = None, user_id: int | None = None,
-                                include_replied: bool = False) -> str:
+                                include_replied: bool = False, all_in_lesson: bool = False) -> str:
     return _run(lambda: json.dumps(moderation.plan_delete_comments(
-        CLIENT, course_id, text, contains, lesson_position, user_id, include_replied), ensure_ascii=False, indent=2))
+        CLIENT, course_id, text, contains, lesson_position, user_id, include_replied, all_in_lesson),
+        ensure_ascii=False, indent=2))
 
 
 @mcp.tool(

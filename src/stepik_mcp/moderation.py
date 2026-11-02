@@ -5,6 +5,8 @@ plan_delete_comments находит комментарии по фильтру �
 автор назвал их точное число, и только те, что не изменились после плана.
 По умолчанию в план попадают только комментарии аккаунта токена и только
 без ответов: чужие комментарии и ветки с ответами — по явному флагу.
+all_in_lesson берёт все комментарии одного урока: любых авторов, с ответами
+и без фильтра по тексту.
 Полные копии удалённых комментариев остаются в snapshots/.
 """
 
@@ -69,14 +71,19 @@ def _course_steps(client, course_id):
 
 
 def plan_delete_comments(client, course_id, text=None, contains=None, lesson_position=None, user_id=None,
-                         include_replied=False):
+                         include_replied=False, all_in_lesson=False):
     _check_allowed(client, course_id)
-    if not text and not contains:
+    if all_in_lesson:
+        if not lesson_position:
+            raise StepikError("all_in_lesson удаляет комментарии одного урока: укажите lesson_position вида 6.2",
+                              status=400)
+        include_replied = True
+    elif not text and not contains:
         raise StepikError("Нужен фильтр: text (весь текст комментария) или contains (часть текста)", status=400)
     if lesson_position is not None and not re.fullmatch(r"[1-9][0-9]*\.[1-9][0-9]*", lesson_position):
         raise StepikError("lesson_position должен быть вида 6.2", status=400)
     me = ((client.get("stepics/1").get("users") or [{}])[0]).get("id")
-    author = me if user_id is None else user_id
+    author = user_id if user_id is not None or all_in_lesson else me
     positions = _course_steps(client, course_id)
     rows, truncated = collect_limited(client, "comments", max_items=MAX_COMMENTS, course=course_id)
 
@@ -89,7 +96,7 @@ def plan_delete_comments(client, course_id, text=None, contains=None, lesson_pos
             continue  # комментарий не под шагом этого курса
         if lesson_position and not position.startswith(lesson_position + "."):
             continue
-        if row.get("user") != author or row.get("is_deleted"):
+        if (author is not None and row.get("user") != author) or row.get("is_deleted"):
             continue
         body = plain_text(row.get("text"))
         if wanted_text is not None and body != wanted_text:
@@ -114,7 +121,8 @@ def plan_delete_comments(client, course_id, text=None, contains=None, lesson_pos
     plan_id = _now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
     plans = _inside(folder, ".stepik/plans")
     plan = {"version": 1, "plan_id": plan_id, "kind": "delete_comments", "created_at": _now().isoformat(),
-            "course_id": course_id, "author": author, "include_replied": include_replied, "comments": matched}
+            "course_id": course_id, "author": author, "include_replied": include_replied,
+            "all_in_lesson": all_in_lesson, "comments": matched}
     lines = [f"Удаление комментариев курса {course_id}: {len(matched)} шт.", ""]
     for item in matched:
         reply = f", ответ на {item['parent']}" if item["parent"] else ""
@@ -123,16 +131,23 @@ def plan_delete_comments(client, course_id, text=None, contains=None, lesson_pos
     listing = _inside(plans, f"{plan_id}.comments.txt")
     _atomic_write(listing, "\n".join(lines) + "\n")
     _atomic_write(_inside(plans, f"{plan_id}.json"), json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
-    by_lesson = {}
+    by_lesson, by_user = {}, {}
     for item in matched:
         lesson = item["position"].rsplit(".", 1)[0]
         by_lesson[lesson] = by_lesson.get(lesson, 0) + 1
-    others = author != me
+        by_user[item["user"]] = by_user.get(item["user"], 0) + 1
+    if all_in_lesson and author is None:
+        warning = (f"Удаляются комментарии всех авторов урока {lesson_position}, включая учеников "
+                   f"и ветки с ответами: {len(matched)} шт.")
+    elif author != me:
+        warning = f"Это комментарии другого пользователя ({author}), не автора курса"
+    else:
+        warning = None
     return {
         "status": "planned", "plan_id": plan_id, **summary, "confirm_count": len(matched),
-        "by_lesson": by_lesson, "examples": [item["preview"] for item in matched[:5]],
+        "by_lesson": by_lesson, "by_user": by_user, "examples": [item["preview"] for item in matched[:5]],
         "list_path": str(listing),
-        **({"warning": f"Это комментарии другого пользователя ({author}), не автора курса"} if others else {}),
+        **({"warning": warning} if warning else {}),
         "note": "Ничего не удалено. Покажите автору список и вызывайте stepik_apply_delete_comments с "
                 "confirm_count, только если автор подтвердил удаление. Удаление на Stepik не отменить; "
                 "копии комментариев сохранятся в snapshots/.",
@@ -170,7 +185,8 @@ def apply_delete_comments(client, course_id, plan_id, confirm_count):
         _atomic_write(snapshot, json.dumps([current[item["id"]] for item in planned if item["id"] in current],
                                            ensure_ascii=False, indent=2) + "\n")
         deleted, skipped = [], []
-        for item in planned:
+        # Сначала ответы, потом корни веток: удалённый корень может унести ответы с собой.
+        for item in sorted(planned, key=lambda item: item.get("parent") is None):
             row = current.get(item["id"])
             reason = None
             if row is None or row.get("is_deleted"):
