@@ -1,0 +1,1039 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 8.2. Разбор ответа: JSON снова в деле</h2>
+
+<p><strong>Аннотация:</strong><br />
+В уроке 8.1 ПривычкаБот научился спрашивать погоду: <code>aiohttp</code>, <code>params=</code>, <code>await response.json()</code>. Ответ пришёл &mdash; словарь в три уровня, где нужные боту два числа спрятаны внутри. Сегодня достанем их оттуда и превратим в строку для утреннего сообщения: &laquo;+3, ясно&raquo;.</p>
+
+<p>Главная трудность не в том, чтобы достать число. Ответ пишет чужая программа, и он не всегда такой, как мы ждём. Город может не найтись, а формат &mdash; поменяться. Бот должен это пережить.</p>
+
+<blockquote><strong>🛠 Как устроен урок:</strong><br />
+Работаем в той же папке <code>http_lab</code>, что в уроке 8.1, с тем же окружением проекта. Файлы ПривычкаБота не меняются. Новое &mdash; файл <code>weather_parse.py</code>: в нём соберутся функции разбора ответа, которые в практикуме 8.4 перейдут в проект.</blockquote>
+
+<blockquote><strong>🎯 Цель урока:</strong><br />
+&bull; Увидеть, что <code>response.json()</code> &mdash; это знакомый <code>json.loads()</code> &mdash; <strong>раздел 1</strong><br />
+&bull; Рассмотреть два ответа Open-Meteo целиком &mdash; <strong>раздел 2</strong><br />
+&bull; Дойти до нужного значения ключ за ключом &mdash; <strong>раздел 3</strong><br />
+&bull; Уронить программу на городе, которого нет, &mdash; <strong>раздел 4</strong><br />
+&bull; Читать ответ так, чтобы он не мог уронить бота, &mdash; <strong>раздел 5</strong><br />
+&bull; Превратить код погоды в слово и написать <code>describe_weather()</code> &mdash; <strong>раздел 6 и задача</strong><br />
+&bull; Собрать всё вместе: город &rarr; координаты &rarr; погода &mdash; <strong>раздел 7</strong><br />
+&bull; Понять, почему ответу чужого сервиса нельзя доверять &mdash; <strong>раздел 8</strong></blockquote>
+
+<h2>🔁 1. JSON вернулся</h2>
+
+<p>В уроке 7.1 JSON ушёл из ПривычкаБота: хранить данные в файле оказалось неудобно, и их забрала база. Но сам формат никуда не делся. В уроке 8.1 сервер прислал ответ &mdash; и это был JSON.</p>
+
+<p>Только теперь у JSON другая роль. Раньше это было <strong>хранилище</strong>: бот записывал файл и сам же его читал. Теперь это <strong>формат обмена</strong>: одна программа пишет, другая читает. Так договариваются программы в интернете: ответы почти всех сервисов &mdash; JSON.</p>
+
+<p>Куда же делся <code>json.loads()</code>? В уроке 8.1 мы вызывали <code>await response.json()</code> и сразу получали словарь. Проверим, что внутри. Создайте в <code>http_lab</code> файл <code>bridge_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+import json
+
+import aiohttp
+
+URL = "https://api.open-meteo.com/v1/forecast"
+PARAMS = {
+    "latitude": 55.79,
+    "longitude": 49.12,
+    "current": "temperature_2m,weather_code",
+}
+
+
+async def main() -&gt; None:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(URL, params=PARAMS) as response:
+            text = await response.text()
+            data = await response.json()
+
+    print(type(text).__name__, text[:45])
+    print(type(data).__name__, data["current"])
+    print(json.loads(text) == data)
+
+
+asyncio.run(main())</code></pre>
+
+<p>Здесь у одного ответа два вызова. <code>response.text()</code> отдаёт тело ответа как есть &mdash; строкой. <code>response.json()</code> отдаёт его же, но уже словарём. Последняя строка разбирает строку сама, через <code>json.loads()</code> из урока 2.5, и сравнивает с тем, что дала библиотека.</p>
+
+<p>Запустите <code>python bridge_demo.py</code>:</p>
+
+<pre><code>str {"latitude":55.79072,"longitude":49.10105,"ge
+dict {'time': '2026-11-01T14:15', 'interval': 900, 'temperature_2m': 3.1, 'weather_code': 0}
+True</code></pre>
+<!-- АВТОР: прогон на учебной копии сервиса с ответами, записанными с Open-Meteo 01.11.2026; у ученика будут текущие числа -->
+
+<p>Первая строка: сервер прислал <code>str</code> &mdash; текст, который начинается с фигурной скобки. Вторая: <code>json()</code> вернул <code>dict</code>. Третья: <code>True</code> &mdash; словарь из <code>json.loads(text)</code> равен словарю из <code>response.json()</code>.</p>
+
+<pre><code>урок 2.5:   файл    &rarr;  json.load(f)        &rarr;  словарь
+урок 8.2:   ответ   &rarr;  response.json()     &rarr;  словарь
+                      (внутри &mdash; json.loads)</code></pre>
+
+<p>Разбирать JSON вручную не нужно: это делает библиотека. А вот что делать со словарём дальше &mdash; решаем мы.</p>
+
+<blockquote><strong>🔑 response.json() &mdash; это json.loads() за вас:</strong><br />
+Сервер присылает текст в формате JSON. <code>aiohttp</code> дочитывает его и разбирает в словарь той же функцией, что вы вызывали в уроке 2.5.</blockquote>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>🔭 2. Два ответа целиком</h2>
+
+<p>Боту понадобятся два запроса к Open-Meteo:</p>
+
+<ul>
+	<li><strong>Геокодер</strong>: отправляем название города &mdash; получаем координаты.</li>
+	<li><strong>Прогноз</strong>: отправляем координаты &mdash; получаем погоду.</li>
+</ul>
+
+<p>Пользователь напишет &laquo;Казань&raquo;, а прогнозу нужны широта и долгота. Поэтому сначала геокодер, потом прогноз. Прежде чем доставать из ответов значения, посмотрим на них целиком.</p>
+
+<p>Словарь из ответа можно вывести через <code>print()</code>, но он уйдёт в одну длинную строку, как в уроке 8.1. Для отладки в уроке 2.5 был способ получше &mdash; <code>json.dumps()</code> с отступами:</p>
+
+<pre><code>json.dumps(data, indent=2, ensure_ascii=False)</code></pre>
+
+<p><code>indent=2</code> переносит каждый ключ на свою строку и сдвигает вложенное на два пробела. <code>ensure_ascii=False</code> оставляет кириллицу кириллицей, а не <code>К...</code>.</p>
+
+<p>Создайте <code>look_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+import json
+
+import aiohttp
+
+GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+GEO_PARAMS = {"name": "Казань", "count": 1, "language": "ru"}
+FORECAST_PARAMS = {
+    "latitude": 55.78874,
+    "longitude": 49.12214,
+    "current": "temperature_2m,weather_code",
+}
+
+
+async def get_json(url: str, params: dict) -&gt; dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            return await response.json()
+
+
+async def main() -&gt; None:
+    geo = await get_json(GEO_URL, GEO_PARAMS)
+    print(json.dumps(geo, indent=2, ensure_ascii=False))
+
+    forecast = await get_json(FORECAST_URL, FORECAST_PARAMS)
+    print(json.dumps(forecast, indent=2, ensure_ascii=False))
+
+
+asyncio.run(main())</code></pre>
+
+<p>Запрос вынесен в функцию <code>get_json()</code>: открыть сессию, отправить запрос, вернуть словарь. Это три строки из урока 8.1, только адрес и параметры приходят аргументами. Координаты Казани в <code>FORECAST_PARAMS</code> &mdash; те, что вернёт геокодер. Пока мы переписали их руками, в разделе 7 код возьмёт их сам.</p>
+
+<p>Запустите <code>python look_demo.py</code>. Первым напечатается ответ геокодера:</p>
+
+<pre><code>{
+  "results": [
+    {
+      "id": 551487,
+      "name": "Казань",
+      "latitude": 55.78874,
+      "longitude": 49.12214,
+      "elevation": 61.0,
+      "feature_code": "PPLA",
+      "country_code": "RU",
+      "admin1_id": 484048,
+      "admin2_id": 862913,
+      "timezone": "Europe/Moscow",
+      "population": 1243500,
+      "country_id": 2017370,
+      "country": "Россия",
+      "admin1": "Татарстан",
+      "admin2": "Gorodskoy Okrug Kazan’"
+    }
+  ],
+  "generationtime_ms": 0.1282692
+}</code></pre>
+
+<p>Снаружи &mdash; словарь с двумя ключами: <code>"results"</code> и <code>"generationtime_ms"</code>, время работы сервера. Под <code>"results"</code> &mdash; квадратные скобки, то есть список. В нём один словарь: мы просили <code>"count": 1</code>, одно место. Внутри словаря &mdash; название, регион, население и нужные нам <code>"latitude"</code> и <code>"longitude"</code>.</p>
+
+<p>Следом &mdash; ответ прогноза:</p>
+
+<pre><code>{
+  "latitude": 55.79072,
+  "longitude": 49.10105,
+  "generationtime_ms": 0.037789344787597656,
+  "utc_offset_seconds": 0,
+  "timezone": "GMT",
+  "timezone_abbreviation": "GMT",
+  "elevation": 70.0,
+  "current_units": {
+    "time": "iso8601",
+    "interval": "seconds",
+    "temperature_2m": "°C",
+    "weather_code": "wmo code"
+  },
+  "current": {
+    "time": "2026-11-01T14:45",
+    "interval": 900,
+    "temperature_2m": 3.0,
+    "weather_code": 0
+  }
+}</code></pre>
+
+<p>Здесь тоже словарь, а погода &mdash; во вложенном словаре <code>"current"</code>. Рядом &mdash; <code>"current_units"</code>: единицы измерения. Температура в градусах Цельсия, код погоды &mdash; по таблице WMO. Что это за таблица, разберём в разделе 6.</p>
+
+<p>Заметьте: <code>"latitude"</code> в ответе прогноза &mdash; не та, что мы отправили. Сервис считает погоду по точкам своей сетки и взял ближайшую. Для бота это не важно: нам нужно содержимое <code>"current"</code>.</p>
+
+<h3>Схема двух ответов</h3>
+
+<pre><code>геокодер                              прогноз
+{                                     {
+  "results": [          &larr; список       "current_units": {...},
+    {                   &larr; словарь      "current": {        &larr; словарь
+      "latitude": ...,                    "temperature_2m": ...,
+      "longitude": ...                    "weather_code": ...
+    }                                   }
+  ]                                   }
+}</code></pre>
+
+<blockquote><strong>🔑 Сначала посмотреть, потом доставать:</strong><br />
+Чужой ответ печатаем через <code>json.dumps(data, indent=2, ensure_ascii=False)</code>. Отступы показывают вложенность: где словарь, где список и на какой глубине лежит нужное значение.</blockquote>
+
+
+<!-- ═══ ШАГ 3 · text · новый шаг ═══ -->
+
+<h2>🪜 3. Путь к значению</h2>
+
+<p>Значение внутри вложенного словаря достают по шагам: каждый шаг &mdash; одна пара квадратных скобок. Для температуры путь такой:</p>
+
+<pre><code>forecast                                &rarr;  словарь ответа
+forecast["current"]                     &rarr;  вложенный словарь current
+forecast["current"]["temperature_2m"]   &rarr;  число 3.0</code></pre>
+
+<p>Читается слева направо. <code>forecast["current"]</code> возвращает вложенный словарь. От него <code>["temperature_2m"]</code> возвращает число. Каждые скобки работают с тем, что вернули предыдущие.</p>
+
+<p>В ответе геокодера на пути есть список. У списка нет ключей, только номера, поэтому шаг к первому месту &mdash; <code>[0]</code>:</p>
+
+<pre><code>geo["results"]                  &rarr;  список мест
+geo["results"][0]               &rarr;  словарь: первое место
+geo["results"][0]["latitude"]   &rarr;  число 55.78874</code></pre>
+
+<p>Пройдём оба пути по шагам и на каждом посмотрим, что получили. Скопируйте <code>look_demo.py</code> в <code>path_demo.py</code> и замените функцию <code>main()</code>:</p>
+
+<pre><code class="language-python">async def main() -&gt; None:
+    geo = await get_json(GEO_URL, GEO_PARAMS)
+    results = geo["results"]
+    print("results:", type(results).__name__, "из", len(results))
+    place = results[0]
+    print("place:", type(place).__name__)
+    print("координаты:", place["latitude"], place["longitude"])
+
+    forecast = await get_json(FORECAST_URL, FORECAST_PARAMS)
+    current = forecast["current"]
+    print("температура:", current["temperature_2m"])
+    print("код погоды:", current["weather_code"])</code></pre>
+
+<p>Запустите <code>python path_demo.py</code>:</p>
+
+<pre><code>results: list из 1
+place: dict
+координаты: 55.78874 49.12214
+температура: 3.0
+код погоды: 0</code></pre>
+
+<p>Каждая строка подтверждает схему из раздела 2. <code>results</code> &mdash; список из одного элемента, <code>place</code> &mdash; словарь, в нём координаты. <code>current</code> &mdash; словарь, в нём два нужных боту значения.</p>
+
+<p>Промежуточные переменные <code>results</code>, <code>place</code>, <code>current</code> &mdash; для наглядности. Путь можно записать и одной строкой: <code>geo["results"][0]["latitude"]</code>. Результат тот же.</p>
+
+<blockquote><strong>🔑 Путь &mdash; ключ за ключом:</strong><br />
+Каждые скобки делают один шаг вглубь: ключ &mdash; для словаря, номер &mdash; для списка. Чтобы записать путь, смотрим на ответ и называем шаги сверху вниз.</blockquote>
+
+
+<!-- ═══ ШАГ 4 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Геокодер вернул такой ответ:</p>
+
+<pre><code>data = {
+    "results": [
+        {"name": "Москва", "latitude": 55.75204, "longitude": 37.61781}
+    ],
+    "generationtime_ms": 0.17,
+}</code></pre>
+
+<p>Какое выражение вернёт <code>55.75204</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li><code>data["results"][0]["latitude"]</code> ✅</li>
+	<li><code>data["results"]["latitude"]</code></li>
+	<li><code>data["latitude"]</code></li>
+	<li><code>data[0]["results"]["latitude"]</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Три шага: ключ <code>"results"</code> &mdash; список, номер <code>0</code> &mdash; первое место, ключ <code>"latitude"</code> &mdash; число.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите, что стоит после <code>"results":</code> &mdash; фигурная или квадратная скобка? У списка нет ключей, только номера. Без шага <code>[0]</code> Python ответит <code>TypeError: list indices must be integers or slices, not str</code>.</p>
+
+
+<!-- ═══ ШАГ 5 · text · новый шаг ═══ -->
+
+<h2>💥 4. Города нет &mdash; бот падает</h2>
+
+<p>Путь из раздела 3 сработал, потому что Казань нашлась. Пользователь же может написать что угодно: опечатку, выдуманное название, город, которого нет в базе сервиса. Проверим, что тогда пришлёт геокодер.</p>
+
+<p>Скопируйте <code>look_demo.py</code> в <code>crash_demo.py</code> и замените <code>main()</code>:</p>
+
+<pre><code class="language-python">async def main() -&gt; None:
+    params = {"name": "Привычкоград", "count": 1, "language": "ru"}
+    geo = await get_json(GEO_URL, params)
+    print(geo)
+    place = geo["results"][0]
+    print(place["latitude"], place["longitude"])</code></pre>
+
+<p>&laquo;Привычкоград&raquo; &mdash; города с таким названием нет. Сначала печатаем ответ целиком, потом идём к координатам тем же путём, что в разделе 3.</p>
+
+<p>Запустите <code>python crash_demo.py</code>:</p>
+
+<pre><code>{'generationtime_ms': 0.19586086}
+Traceback (most recent call last):
+  File "crash_demo.py", line 30, in &lt;module&gt;
+    asyncio.run(main())
+  ...
+  File "crash_demo.py", line 26, in main
+    place = geo["results"][0]
+            ~~~^^^^^^^^^^^
+KeyError: 'results'</code></pre>
+
+<p>Посмотрите на первую строку. Геокодер не прислал ни ошибки, ни пустого списка. Ключа <code>"results"</code> в ответе нет вовсе: остался только <code>"generationtime_ms"</code>. Статус при этом &mdash; <code>200</code>. Мы проверили в браузере: для сервиса &laquo;ничего не найдено&raquo; &mdash; нормальный успешный ответ.</p>
+
+<p>А код пошёл к <code>geo["results"]</code>, как будто ключ есть. Обращение к несуществующему ключу через квадратные скобки &mdash; <code>KeyError</code>, та же ошибка, что в уроке 2.3.</p>
+
+<p>В боте это выглядело бы так. Аня пишет <code>/city Казнь</code> с опечаткой. Хэндлер падает на <code>KeyError</code>, aiogram пишет ошибку в лог, а Аня не получает никакого ответа. Бот не объяснил, что не так, &mdash; он промолчал.</p>
+
+<blockquote><strong>🔑 Квадратные скобки обещают, что ключ есть:</strong><br />
+<code>data["results"]</code> работает, только если ключ на месте. В чужом ответе его может не оказаться, и тогда программа падает с <code>KeyError</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 6 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Пользователь ввёл город, которого нет. Программа отправила запрос геокодеру и выполняет строку <code>place = geo["results"][0]</code>. Что произойдёт?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Программа упадёт с <code>KeyError: 'results'</code>: ключа в ответе нет ✅</li>
+	<li>Программа упадёт с <code>IndexError</code>: список <code>results</code> пустой</li>
+	<li>В <code>place</code> окажется <code>None</code></li>
+	<li>Раньше этой строки упадёт запрос: сервер вернёт статус 404</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Open-Meteo в таком случае не присылает пустой список &mdash; он не присылает ключ <code>"results"</code> совсем. Статус при этом 200.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите на первую строку вывода <code>crash_demo.py</code>: какие ключи есть в ответе? И какой ошибкой Python отвечает на обращение к ключу, которого нет?</p>
+
+
+<!-- ═══ ШАГ 7 · text · новый шаг ═══ -->
+
+<h2>🛡 5. Читаем безопасно</h2>
+
+<p>Ключа может не быть &mdash; значит, нужен способ спросить словарь &laquo;есть ли у тебя такой ключ&raquo; и не упасть. Он знаком вам с урока 2.3: метод <code>.get()</code>.</p>
+
+<h3>Шаг 1. .get() вместо скобок</h3>
+
+<p>Возьмём ответ геокодера на &laquo;Привычкоград&raquo; и сравним способы. Создайте <code>get_demo.py</code>, в интернет он не ходит:</p>
+
+<pre><code class="language-python">data = {"generationtime_ms": 0.19586086}
+
+print(data.get("results"))
+print(data.get("results", []))
+print(not None, not [], not [{"name": "Казань"}])
+print(data["results"])</code></pre>
+
+<p>Запустите <code>python get_demo.py</code>:</p>
+
+<pre><code>None
+[]
+True True False
+Traceback (most recent call last):
+  File "get_demo.py", line 6, in &lt;module&gt;
+    print(data["results"])
+          ~~~~^^^^^^^^^^^
+KeyError: 'results'</code></pre>
+
+<p>Разберём строки по очереди.</p>
+
+<ul>
+	<li><code>data.get("results")</code> &mdash; ключа нет, вернулось <code>None</code>. Не ошибка, а ответ &laquo;ничего&raquo;.</li>
+	<li><code>data.get("results", [])</code> &mdash; второй аргумент задаёт, что вернуть вместо <code>None</code>. Здесь &mdash; пустой список.</li>
+	<li><code>not None</code> и <code>not []</code> &mdash; оба <code>True</code>. Список с одним местом даёт <code>False</code>. Одна проверка <code>if not results</code> ловит и отсутствующий ключ, и пустой список.</li>
+	<li><code>data["results"]</code> &mdash; та же ошибка, что в разделе 4.</li>
+</ul>
+
+<h3>Шаг 2. Функция parse_city()</h3>
+
+<p>Теперь соберём разбор ответа геокодера в функцию. Она получает словарь ответа и возвращает координаты &mdash; или <code>None</code>, если их нет. Так же устроены проверки из урока 6.3: <code>parse_frequency()</code> и <code>parse_time()</code> возвращали значение или <code>None</code>, а плохие случаи отсекались ранним <code>return</code> из урока 2.4.</p>
+
+<p>Создайте в <code>http_lab</code> файл <code>weather_parse.py</code>:</p>
+
+<pre><code class="language-python">"""Разбор ответов Open-Meteo."""
+
+
+def parse_city(data: dict) -&gt; tuple[float, float] | None:
+    results = data.get("results")
+    if not results:
+        return None
+
+    place = results[0]
+    latitude = place.get("latitude")
+    longitude = place.get("longitude")
+    if latitude is None or longitude is None:
+        return None
+    return latitude, longitude</code></pre>
+
+<p>Читаем сверху вниз.</p>
+
+<pre><code>results = data.get("results")        &rarr;  список мест или None
+if not results: return None          &rarr;  ключа нет или список пуст
+place = results[0]                   &rarr;  первое место: список точно не пуст
+latitude = place.get("latitude")     &rarr;  число или None
+if ... is None: return None          &rarr;  координат нет
+return latitude, longitude           &rarr;  кортеж из двух чисел</code></pre>
+
+<p>Почему в последней проверке <code>is None</code>, а не <code>not latitude</code>? Широта <code>0</code> &mdash; это экватор, настоящая координата. <code>not 0</code> &mdash; <code>True</code>, и город на экваторе функция бы потеряла. <code>is None</code> отсекает только отсутствие значения.</p>
+
+<p><code>results[0]</code> здесь записан скобками, и это безопасно: строкой выше мы проверили, что список не пуст.</p>
+
+<h3>Шаг 3. Проверка</h3>
+
+<p>Создайте <code>safe_demo.py</code>. Он берёт <code>parse_city()</code> из <code>weather_parse.py</code> и пробует три настоящих запроса и два ответа, собранных руками:</p>
+
+<pre><code class="language-python">import asyncio
+
+import aiohttp
+
+from weather_parse import parse_city
+
+GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+
+
+async def get_json(url: str, params: dict) -&gt; dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            return await response.json()
+
+
+async def main() -&gt; None:
+    for city in ["Казань", "Москва", "Привычкоград"]:
+        params = {"name": city, "count": 1, "language": "ru"}
+        geo = await get_json(GEO_URL, params)
+        print(city, "-&gt;", parse_city(geo))
+
+    print("пустой список -&gt;", parse_city({"results": []}))
+    print("без координат -&gt;", parse_city({"results": [{"name": "Казань"}]}))
+
+
+asyncio.run(main())</code></pre>
+
+<p>Запустите <code>python safe_demo.py</code>:</p>
+
+<pre><code>Казань -&gt; (55.78874, 49.12214)
+Москва -&gt; (55.75204, 37.61781)
+Привычкоград -&gt; None
+пустой список -&gt; None
+без координат -&gt; None</code></pre>
+
+<p>Для Казани и Москвы &mdash; кортеж координат. Для &laquo;Привычкограда&raquo;, пустого списка и места без координат &mdash; <code>None</code>. Программа ни разу не упала. Что ответить пользователю, если пришёл <code>None</code>, решит тот, кто функцию вызвал, &mdash; в разделе 7.</p>
+
+<blockquote><strong>🔑 Чужой ответ читаем через .get():</strong><br />
+<code>.get()</code> возвращает <code>None</code>, если ключа нет. Функция разбора проверяет каждый шаг пути и при первом пропуске возвращает <code>None</code>. Скобки допустимы только там, где строкой выше проверено, что значение есть.</blockquote>
+
+
+<!-- ═══ ШАГ 8 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В словаре <code>data</code> нет ключа <code>"results"</code>. Чем <code>data.get("results")</code> отличается от <code>data["results"]</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li><code>.get()</code> вернёт <code>None</code>, а скобки вызовут <code>KeyError</code> ✅</li>
+	<li>Ничем: оба вернут <code>None</code></li>
+	<li>Ничем: оба вызовут <code>KeyError</code></li>
+	<li><code>.get()</code> добавит ключ <code>"results"</code> в словарь, а скобки &mdash; нет</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Поэтому в <code>parse_city()</code> к ответу обращаемся через <code>.get()</code>, а скобки ставим только после проверки.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите на вывод <code>get_demo.py</code>: что напечатала первая строка и чем закончилась последняя? <code>.get()</code> словарь только читает, ничего в него не добавляет.</p>
+
+
+<!-- ═══ ШАГ 9 · text · новый шаг ═══ -->
+
+<h2>🌤 6. Код погоды &rarr; слово</h2>
+
+<p>Из ответа прогноза боту нужны температура и код погоды. Температура &mdash; число, его можно показать. А <code>"weather_code": 0</code> пользователю ничего не скажет. Нужно слово.</p>
+
+<h3>Шаг 1. Словарь кодов</h3>
+
+<p>Коды погоды &mdash; общая таблица метеорологов, WMO. В ней число означает состояние неба: <code>0</code> &mdash; ясно, <code>3</code> &mdash; пасмурно, <code>61</code> &mdash; слабый дождь. Open-Meteo присылает код из этой таблицы, а перевести его в слово &mdash; наша работа.</p>
+
+<p>Число &rarr; слово &mdash; это словарь. Добавьте его в <code>weather_parse.py</code> сразу после строки документации, перед <code>parse_city()</code>:</p>
+
+<pre><code class="language-python">WEATHER_CODES = {
+    0: "ясно",
+    1: "в основном ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "ливень",
+    95: "гроза",
+}</code></pre>
+
+<p>Ключи &mdash; числа, без кавычек: в ответе код приходит числом, <code>"weather_code": 0</code>. Строка <code>"0"</code> ключом <code>0</code> не считается, и такой словарь ничего бы не нашёл.</p>
+
+<p>В словаре не все коды таблицы, а самые частые. Каких нет &mdash; например, <code>77</code>, снежные зёрна. Если сервис пришлёт такой код, <code>WEATHER_CODES[77]</code> упадёт с <code>KeyError</code>. Значит, и здесь нужен <code>.get()</code> &mdash; с запасным текстом вторым аргументом.</p>
+
+<h3>Шаг 2. Знак у температуры</h3>
+
+<p>В утреннем сообщении температура должна выглядеть так, как её пишут в прогнозах: целое число со знаком, &laquo;+3&raquo; или &laquo;-3&raquo;. Целое даёт <code>round()</code>. Знак даёт формат внутри f-строки &mdash; вы встречали формат <code>{hours:02d}</code> в <code>parse_time()</code> урока 6.3. Здесь другой: <code>{degrees:+d}</code> &mdash; целое число, и знак ставить всегда, даже плюс.</p>
+
+<p>Проверим и словарь, и знак. Создайте <code>codes_demo.py</code>:</p>
+
+<pre><code class="language-python">from weather_parse import WEATHER_CODES
+
+for code in [0, 51, 77]:
+    print(code, "-&gt;", WEATHER_CODES.get(code, "без описания"))
+
+for temperature in [17.6, 3.0, -3.0, -0.4]:
+    degrees = round(temperature)
+    print(temperature, "-&gt;", degrees, f"{degrees:+d}")</code></pre>
+
+<p>Запустите <code>python codes_demo.py</code>:</p>
+
+<pre><code>0 -&gt; ясно
+51 -&gt; слабая морось
+77 -&gt; без описания
+17.6 -&gt; 18 +18
+3.0 -&gt; 3 +3
+-3.0 -&gt; -3 -3
+-0.4 -&gt; 0 +0</code></pre>
+
+<p>Коды: известные превратились в слова, неизвестный <code>77</code> &mdash; в запасной текст, и программа не упала.</p>
+
+<p>Температура: <code>17.6</code> округлилась до <code>18</code>, а формат добавил плюс. У <code>-3</code> минус свой. А вот последняя строка: <code>-0.4</code> округлилось до <code>0</code>, и формат честно написал <code>+0</code>. В прогнозах так не пишут &mdash; ноль пишут без знака. Этот случай придётся обработать отдельно.</p>
+
+<h3>Что должна вернуть функция</h3>
+
+<p>Теперь у нас есть всё, чтобы из ответа прогноза получить строку для бота:</p>
+
+<pre><code>{"current": {"temperature_2m": 3.0, "weather_code": 0}}   &rarr;  "+3, ясно"
+{"current": {"temperature_2m": -0.4, "weather_code": 3}}  &rarr;  "0, пасмурно"
+{"generationtime_ms": 0.2}                                &rarr;  None</code></pre>
+
+<p>Эту функцию, <code>describe_weather()</code>, вы напишете в задаче 1. Она встанет в <code>weather_parse.py</code> рядом с <code>parse_city()</code>, а в практикуме 8.4 вместе с ней перейдёт в проект без изменений.</p>
+
+<blockquote><strong>🔑 Перевод кода &mdash; словарём и .get():</strong><br />
+<code>WEATHER_CODES.get(code, "без описания")</code> находит слово для известного кода и не падает на неизвестном. Знак температуры ставит формат <code>{degrees:+d}</code>, кроме нуля.</blockquote>
+
+
+<!-- ═══ ШАГ 10 · code · новый шаг ═══ -->
+
+<h3>✍️ Задача 1. Погода одной строкой</h3>
+
+<p><strong>Уровень:</strong> ⭐⭐ Basic</p>
+
+<p>Это та часть утреннего сообщения, которую бот покажет пользователю. Функция, которую вы напишете, в разделе 7 разберёт настоящий ответ Open-Meteo, а в практикуме 8.4 войдёт в код ПривычкаБота без изменений.</p>
+
+<p>Напишите функцию <code>describe_weather(data)</code>, которая получает словарь ответа прогноза и возвращает погоду строкой: <code>"+3, ясно"</code>. Словарь <code>WEATHER_CODES</code> уже есть в шаблоне.</p>
+
+<p><strong>Важно:</strong> нужно написать только функцию. Не используйте <code>input()</code> и <code>print()</code> внутри решения.</p>
+
+<h4>✅ Что должна делать функция</h4>
+
+<ul>
+	<li>Взять из <code>data</code> вложенный словарь по ключу <code>"current"</code>. Если его нет или он пуст &mdash; вернуть <code>None</code></li>
+	<li>Взять из него <code>"temperature_2m"</code> и <code>"weather_code"</code>. Если нет хотя бы одного &mdash; вернуть <code>None</code></li>
+	<li>Округлить температуру до целого через <code>round()</code></li>
+	<li>Записать её со знаком: <code>+18</code>, <code>-3</code>. Ноль &mdash; без знака: <code>0</code></li>
+	<li>Найти слово для кода в <code>WEATHER_CODES</code>. Если кода там нет &mdash; взять <code>"без описания"</code></li>
+	<li>Вернуть строку <code>"температура, слово"</code>: через запятую и пробел</li>
+</ul>
+
+<h4>💡 Примеры</h4>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Вызов</th>
+			<th>Результат</th>
+			<th>Почему</th>
+		</tr>
+		<tr>
+			<td><code>describe_weather({"current": {"temperature_2m": 3.0, "weather_code": 0}})</code></td>
+			<td><code>'+3, ясно'</code></td>
+			<td>Обычный ответ</td>
+		</tr>
+		<tr>
+			<td><code>describe_weather({"current": {"temperature_2m": 17.6, "weather_code": 1}})</code></td>
+			<td><code>'+18, в основном ясно'</code></td>
+			<td>17.6 округляется до 18</td>
+		</tr>
+		<tr>
+			<td><code>describe_weather({"current": {"temperature_2m": -3.0, "weather_code": 71}})</code></td>
+			<td><code>'-3, слабый снег'</code></td>
+			<td>Минус у числа свой</td>
+		</tr>
+		<tr>
+			<td><code>describe_weather({"current": {"temperature_2m": -0.4, "weather_code": 3}})</code></td>
+			<td><code>'0, пасмурно'</code></td>
+			<td>Ноль без знака</td>
+		</tr>
+		<tr>
+			<td><code>describe_weather({"current": {"temperature_2m": 5.2, "weather_code": 77}})</code></td>
+			<td><code>'+5, без описания'</code></td>
+			<td>Кода 77 нет в словаре</td>
+		</tr>
+		<tr>
+			<td><code>describe_weather({"generationtime_ms": 0.2})</code></td>
+			<td><code>None</code></td>
+			<td>Нет <code>"current"</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<h4>🔍 На чём споткнётся неверное решение</h4>
+
+<ul>
+	<li>Решение со скобками <code>data["current"]</code> упадёт на последнем примере с <code>KeyError: 'current'</code>.</li>
+	<li><code>WEATHER_CODES[code]</code> вместо <code>.get()</code> упадёт на коде 77 с <code>KeyError: 77</code>.</li>
+	<li>Решение без отдельной проверки нуля вернёт <code>'+0, пасмурно'</code>.</li>
+	<li><code>int()</code> вместо <code>round()</code> отбросит дробную часть: из 17.6 получится 17, а не 18.</li>
+	<li>Решение, которое проверяет только <code>"current"</code>, упадёт, если в нём нет температуры: <code>round(None)</code> &mdash; это <code>TypeError</code>.</li>
+</ul>
+
+<details><summary>💡 Подсказка</summary>
+
+<p>Повторите форму <code>parse_city()</code> из раздела 5. Сначала <code>current = data.get("current")</code> и ранний <code>return None</code>, если там пусто. Потом два <code>.get()</code> для температуры и кода и проверка <code>is None</code>: температура <code>0</code> &mdash; настоящее значение, его терять нельзя.</p>
+
+<p>Знак: если округлённое число равно нулю, строка &mdash; <code>"0"</code>, иначе <code>f"{degrees:+d}"</code>. Слово: <code>WEATHER_CODES.get(code, "без описания")</code>. Останется склеить их одной f-строкой.</p>
+</details>
+
+<!-- ↓ шаблон, тесты и эталон &mdash; в поля Stepik ↓ -->
+
+<p><strong>Шаблон (python3.12), <code>::code</code>:</strong></p>
+
+<pre><code>WEATHER_CODES = {
+    0: "ясно",
+    1: "в основном ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "ливень",
+    95: "гроза",
+}
+
+
+def describe_weather(data):
+    pass</code></pre>
+
+<p><strong><code>::footer</code>:</strong></p>
+
+<pre><code>import sys
+exec(sys.stdin.read())</code></pre>
+
+<p><strong>Тест 1:</strong></p>
+<pre><code>kazan = {"current": {"time": "2026-11-01T14:45", "interval": 900, "temperature_2m": 3.0, "weather_code": 0}}
+print(describe_weather(kazan))
+print(describe_weather({"current": {"temperature_2m": 17.6, "weather_code": 1}}))
+print(describe_weather({"current": {"temperature_2m": -3.0, "weather_code": 71}}))</code></pre>
+<p><strong>Вывод:</strong></p>
+<pre><code>+3, ясно
++18, в основном ясно
+-3, слабый снег</code></pre>
+
+<p><strong>Тест 2:</strong></p>
+<pre><code>print(describe_weather({"generationtime_ms": 0.2}))
+print(describe_weather({"current": {"weather_code": 0}}))
+print(describe_weather({"current": {"temperature_2m": 5.2}}))
+print(describe_weather({"current": {}}))</code></pre>
+<p><strong>Вывод:</strong></p>
+<pre><code>None
+None
+None
+None</code></pre>
+
+<p><strong>Тест 3 (скрытый):</strong></p>
+<pre><code>print(describe_weather({"current": {"temperature_2m": 5.2, "weather_code": 77}}))
+print(describe_weather({"current": {"temperature_2m": -0.4, "weather_code": 3}}))
+print(describe_weather({"current": {"temperature_2m": 0.3, "weather_code": 45}}))
+print(describe_weather({"current": {"temperature_2m": -12.6, "weather_code": 75}}))
+print(describe_weather({"current": {"temperature_2m": 0, "weather_code": 0}}))
+print(type(describe_weather({"current": {"temperature_2m": 2.0, "weather_code": 2}})).__name__)</code></pre>
+<p><strong>Вывод:</strong></p>
+<pre><code>+5, без описания
+0, пасмурно
+0, туман
+-13, сильный снег
+0, ясно
+str</code></pre>
+
+<p><strong>Эталон:</strong></p>
+
+<pre><code class="language-python">WEATHER_CODES = {
+    0: "ясно",
+    1: "в основном ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "ливень",
+    95: "гроза",
+}
+
+
+def describe_weather(data: dict) -&gt; str | None:
+    current = data.get("current")
+    if not current:
+        return None
+
+    temperature = current.get("temperature_2m")
+    code = current.get("weather_code")
+    if temperature is None or code is None:
+        return None
+
+    degrees = round(temperature)
+    if degrees == 0:
+        sign = "0"
+    else:
+        sign = f"{degrees:+d}"
+    text = WEATHER_CODES.get(code, "без описания")
+    return f"{sign}, {text}"</code></pre>
+
+
+<!-- ═══ ШАГ 11 · text · новый шаг ═══ -->
+
+<h2>🧩 7. Город &rarr; координаты &rarr; погода</h2>
+
+<p>Добавьте в конец <code>weather_parse.py</code> свою <code>describe_weather()</code> из задачи 1. Теперь в файле три части: словарь кодов и две функции разбора.</p>
+
+<details><summary>Показать weather_parse.py целиком</summary>
+
+<pre><code class="language-python">"""Разбор ответов Open-Meteo."""
+
+WEATHER_CODES = {
+    0: "ясно",
+    1: "в основном ясно",
+    2: "переменная облачность",
+    3: "пасмурно",
+    45: "туман",
+    48: "туман с изморозью",
+    51: "слабая морось",
+    53: "морось",
+    55: "сильная морось",
+    61: "слабый дождь",
+    63: "дождь",
+    65: "сильный дождь",
+    71: "слабый снег",
+    73: "снег",
+    75: "сильный снег",
+    80: "ливень",
+    95: "гроза",
+}
+
+
+def parse_city(data: dict) -&gt; tuple[float, float] | None:
+    results = data.get("results")
+    if not results:
+        return None
+
+    place = results[0]
+    latitude = place.get("latitude")
+    longitude = place.get("longitude")
+    if latitude is None or longitude is None:
+        return None
+    return latitude, longitude
+
+
+def describe_weather(data: dict) -&gt; str | None:
+    current = data.get("current")
+    if not current:
+        return None
+
+    temperature = current.get("temperature_2m")
+    code = current.get("weather_code")
+    if temperature is None or code is None:
+        return None
+
+    degrees = round(temperature)
+    if degrees == 0:
+        sign = "0"
+    else:
+        sign = f"{degrees:+d}"
+    text = WEATHER_CODES.get(code, "без описания")
+    return f"{sign}, {text}"</code></pre>
+</details>
+
+<p>Осталось связать два запроса. Название города &rarr; геокодер &rarr; <code>parse_city()</code> &rarr; координаты &rarr; прогноз &rarr; <code>describe_weather()</code> &rarr; строка. И на каждом шаге, где может прийти <code>None</code>, решить, что сказать пользователю.</p>
+
+<p>Создайте <code>full_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+
+import aiohttp
+
+from weather_parse import describe_weather, parse_city
+
+GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+async def get_json(url: str, params: dict) -&gt; dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            return await response.json()
+
+
+async def weather_for(city: str) -&gt; str:
+    geo = await get_json(GEO_URL, {"name": city, "count": 1, "language": "ru"})
+    coords = parse_city(geo)
+    if coords is None:
+        return f"{city}: город не найден"
+
+    latitude, longitude = coords
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": "temperature_2m,weather_code",
+    }
+    forecast = await get_json(FORECAST_URL, params)
+    weather = describe_weather(forecast)
+    if weather is None:
+        return f"{city}: погода недоступна"
+    return f"{city}: {weather}"
+
+
+async def main() -&gt; None:
+    for city in ["Казань", "Москва", "Привычкоград"]:
+        print(await weather_for(city))
+
+
+asyncio.run(main())</code></pre>
+
+<p>Посмотрите на <code>weather_for()</code>. Это тот код, который в практикуме 8.4 окажется в хэндлере. В нём две проверки на <code>None</code>, и обе заканчиваются понятным ответом:</p>
+
+<ul>
+	<li><code>parse_city()</code> вернула <code>None</code> &mdash; города нет, так и говорим.</li>
+	<li><code>describe_weather()</code> вернула <code>None</code> &mdash; ответ прогноза не такой, как мы ждали. Говорим, что погода недоступна.</li>
+</ul>
+
+<p>Функции разбора ничего не знают о пользователе: они только отвечают &laquo;вот значение&raquo; или &laquo;его нет&raquo;. Что сказать человеку, решает вызывающий код. Это разделение из урока 2.4: функция возвращает, а не печатает.</p>
+
+<p>Запустите <code>python full_demo.py</code>:</p>
+
+<pre><code>Казань: +3, ясно
+Москва: +3, в основном ясно
+Привычкоград: город не найден</code></pre>
+
+<p>Две настоящие погоды и одно честное &laquo;город не найден&raquo; вместо <code>KeyError</code>. Москва: <code>2.9</code> округлилось до <code>+3</code>, код <code>1</code> стал &laquo;в основном ясно&raquo;.</p>
+
+<blockquote><strong>🔑 Функция разбора отвечает &laquo;есть&raquo; или &laquo;нет&raquo;, ответ пользователю выбирает вызывающий:</strong><br />
+<code>parse_city()</code> и <code>describe_weather()</code> возвращают значение или <code>None</code>. Каждое <code>None</code> вызывающий код превращает в понятное сообщение.</blockquote>
+
+
+<!-- ═══ ШАГ 12 · text · новый шаг ═══ -->
+
+<h2>🤝 8. Почему не доверяем ответу</h2>
+
+<p>Может показаться, что все эти <code>.get()</code> и проверки &mdash; ради одного случая: города нет. Но защищаемся мы от большего.</p>
+
+<p>Ответ пишет чужая программа. Open-Meteo &mdash; не наш код: его авторы могут переименовать ключ, убрать поле, поменять вложенность. Документацию они обновят, а наш бот об этом не узнает.</p>
+
+<p>Представим, что так случилось: в новой версии сервиса <code>"temperature_2m"</code> стал называться <code>"temperature"</code>. Создайте <code>changed_demo.py</code>:</p>
+
+<pre><code class="language-python">from weather_parse import describe_weather
+
+changed = {
+    "current": {"time": "2026-11-01T14:45", "temperature": 3.0, "weather_code": 0}
+}
+
+print(describe_weather(changed))
+print(changed["current"]["temperature_2m"])</code></pre>
+
+<p>Первая строка разбирает изменённый ответ нашей функцией, вторая &mdash; путём со скобками, как в разделе 3. Запустите <code>python changed_demo.py</code>:</p>
+
+<pre><code>None
+Traceback (most recent call last):
+  File "changed_demo.py", line 8, in &lt;module&gt;
+    print(changed["current"]["temperature_2m"])
+          ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+KeyError: 'temperature_2m'</code></pre>
+
+<p><code>describe_weather()</code> вернула <code>None</code>, и в <code>full_demo.py</code> пользователь увидел бы &laquo;погода недоступна&raquo;. Путь со скобками упал. В боте такое падение означает: хэндлер не ответил, и утреннее сообщение не пришло совсем &mdash; ни погоды, ни привычек.</p>
+
+<p>С этой мыслью вы уже встречались. В уроке 5.2 было правило &laquo;кнопка живёт дольше кода&raquo;: сообщение с клавиатурой остаётся в чате, а бот за это время меняется. Обработчик должен пережить нажатие на старую кнопку.</p>
+
+<p>Здесь то же самое, только с другой стороны. Там наш код менялся, а данные в чате оставались старыми. Здесь наш код прежний, а меняются данные, которые приходят снаружи. В обоих случаях бот не управляет тем, что получает, и должен пережить неожиданное.</p>
+
+<pre><code>урок 5.2:  данные старые, код новый      &rarr;  обработчик переживает старую кнопку
+урок 8.2:  код прежний, данные новые     &rarr;  разбор переживает другой ответ</code></pre>
+
+<p>Худшее, что может случиться с погодой, &mdash; она не покажется. Утреннее сообщение с привычками должно прийти всё равно. Поэтому разбор ответа не падает, а возвращает <code>None</code>, и бот продолжает работу.</p>
+
+<blockquote><strong>🔑 Чужим данным не доверяем:</strong><br />
+Формат ответа определяет не наш код, а чужой сервис, и он может измениться. Разбор проверяет каждый шаг пути: что-то не так &mdash; <code>None</code>, а не падение бота.</blockquote>
+
+
+<!-- ═══ ШАГ 13 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Open-Meteo обновился: ключ <code>"temperature_2m"</code> теперь называется <code>"temperature"</code>, геокодер работает как раньше. Что напечатает <code>full_demo.py</code> для Казани?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li><code>Казань: погода недоступна</code> ✅</li>
+	<li><code>Казань: город не найден</code></li>
+	<li><code>Казань: +3, ясно</code></li>
+	<li>Ничего: программа упадёт с <code>KeyError: 'temperature_2m'</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. <code>parse_city()</code> нашла координаты, а <code>describe_weather()</code> не нашла температуру и вернула <code>None</code>. Это <code>None</code> <code>weather_for()</code> превратила в сообщение.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Пройдите <code>weather_for()</code> по шагам. Какая функция разбирает ответ геокодера и изменился ли он? Что делает <code>describe_weather()</code>, если <code>current.get("temperature_2m")</code> вернул <code>None</code>?</p>
+
+
+<!-- ═══ ШАГ 14 · matching · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Сопоставьте вызов и то, что он делает.</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: сопоставление) ↓ -->
+
+<ol>
+	<li><code>json.load(f)</code> &rarr; читает JSON из открытого файла и возвращает словарь</li>
+	<li><code>json.loads(text)</code> &rarr; разбирает JSON из строки и возвращает словарь</li>
+	<li><code>await response.json()</code> &rarr; дочитывает ответ сервера и разбирает его JSON</li>
+	<li><code>json.dumps(data, indent=2, ensure_ascii=False)</code> &rarr; превращает словарь в строку с отступами для чтения</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Буква <code>s</code> &mdash; от string, строка. А <code>response.json()</code> делает то же, что <code>json.loads()</code>, только строку берёт из ответа сам.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните урок 2.5: функции без <code>s</code> работают с файлами, с <code>s</code> &mdash; со строками. <code>load</code> &mdash; прочитать JSON, <code>dump</code> &mdash; записать. Что вернула последняя строка <code>bridge_demo.py</code>?</p>
+
+
+<!-- ═══ ШАГ 15 · text · новый шаг ═══ -->
+
+<h2>📋 Итог урока 8.2</h2>
+
+<p>В <code>http_lab</code> появился <code>weather_parse.py</code>: словарь кодов и две функции, которые превращают ответы Open-Meteo в то, что нужно боту, и не падают на неожиданном.</p>
+
+<ul>
+	<li>✅ JSON вернулся, но как формат обмена, а не хранилище; <code>response.json()</code> &mdash; это <code>json.loads()</code> внутри библиотеки</li>
+	<li>✅ Чужой ответ сначала смотрим через <code>json.dumps(data, indent=2, ensure_ascii=False)</code></li>
+	<li>✅ Путь к значению &mdash; ключ за ключом: <code>forecast["current"]["temperature_2m"]</code>, у списка шаг &mdash; номер <code>[0]</code></li>
+	<li>✅ Город не найден &mdash; ключа <code>"results"</code> нет, статус 200; скобки падают с <code>KeyError</code></li>
+	<li>✅ Безопасное чтение: <code>.get()</code>, проверка <code>if not results</code>, ранний <code>return None</code></li>
+	<li>✅ Код погоды &rarr; слово: <code>WEATHER_CODES.get(code, "без описания")</code></li>
+	<li>✅ Знак температуры &mdash; <code>{degrees:+d}</code>, ноль без знака</li>
+	<li>✅ Функция разбора возвращает значение или <code>None</code>, что сказать пользователю &mdash; решает вызывающий код</li>
+	<li>✅ Формат чужого ответа может измениться, и бот должен это пережить</li>
+</ul>
+
+<h3>📝 Шпаргалка</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Запись</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td><code>print(json.dumps(data, indent=2, ensure_ascii=False))</code></td>
+			<td>Показать вложенный словарь с отступами</td>
+		</tr>
+		<tr>
+			<td><code>data["current"]["temperature_2m"]</code></td>
+			<td>Путь к значению; падает, если ключа нет</td>
+		</tr>
+		<tr>
+			<td><code>data["results"][0]</code></td>
+			<td>Первый элемент списка внутри словаря</td>
+		</tr>
+		<tr>
+			<td><code>data.get("results")</code></td>
+			<td>Значение или <code>None</code>, без ошибки</td>
+		</tr>
+		<tr>
+			<td><code>if not results: return None</code></td>
+			<td>Отсечь и <code>None</code>, и пустой список</td>
+		</tr>
+		<tr>
+			<td><code>if value is None: return None</code></td>
+			<td>Отсечь только отсутствие; <code>0</code> проходит</td>
+		</tr>
+		<tr>
+			<td><code>WEATHER_CODES.get(code, "без описания")</code></td>
+			<td>Слово для кода или запасной текст</td>
+		</tr>
+		<tr>
+			<td><code>f"{degrees:+d}"</code></td>
+			<td>Целое число со знаком: <code>+18</code>, <code>-3</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>📌 Что сохранить:</strong><br />
+<code>weather_parse.py</code> с вашей <code>describe_weather()</code> не удаляйте: в практикуме 8.4 его содержимое станет частью <code>weather.py</code> в проекте. Остальные файлы <code>http_lab</code> &mdash; учебные.</blockquote>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>Сегодня мы защитились от ответа, который пришёл, но оказался не таким. Есть случай хуже: ответ не пришёл совсем. Сеть оборвалась, сервер думает минуту, вместо <code>200</code> пришёл <code>500</code>. Тогда до <code>describe_weather()</code> дело не дойдёт: ошибка случится раньше, на <code>session.get()</code>.</p>
+
+<p>В уроке 8.3 разберём, что может пойти не так с самим запросом, как ограничить время ожидания и какие ошибки ловить, чтобы погода не остановила утреннее сообщение.</p>

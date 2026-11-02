@@ -1,0 +1,787 @@
+<!-- ═══ ШАГ 1 · text · новый шаг ═══ -->
+
+<h2>Урок 8.3. Таймауты и падения API: бот не должен зависать</h2>
+
+<p><strong>Аннотация:</strong><br />
+В уроке 8.2 ПривычкаБот научился разбирать ответ Open-Meteo и переживать ответ не того формата. Но всё это работает, только когда ответ пришёл. Сегодня разберём случаи хуже: сервис думает слишком долго, сети нет, вместо данных пришла ошибка или веб-страница.</p>
+
+<p>Цель &mdash; одна функция <code>get_weather(city)</code>. Она либо возвращает погоду, либо <code>None</code>, но никогда не роняет бота и не заставляет пользователя ждать минутами.</p>
+
+<blockquote><strong>🛠 Как устроен урок:</strong><br />
+Работаем в папке <code>http_lab</code> из уроков 8.1 и 8.2, рядом с <code>weather_parse.py</code>. Новый файл &mdash; <code>weather_net.py</code> с запросами к сервису. В практикуме 8.4 оба файла станут одним <code>weather.py</code> в проекте. Файлы ПривычкаБота сегодня не меняются.</blockquote>
+
+<blockquote><strong>🎯 Цель урока:</strong><br />
+&bull; Понять, чем опасен медленный сервис, &mdash; <strong>раздел 1</strong><br />
+&bull; Ограничить ожидание через <code>ClientTimeout</code> &mdash; <strong>раздел 2</strong><br />
+&bull; Получить каждый вид отказа своими руками &mdash; <strong>раздел 3</strong><br />
+&bull; Написать <code>get_weather()</code>, которая ловит только нужные исключения, &mdash; <strong>раздел 4</strong><br />
+&bull; Показать пользователю заглушку вместо молчания &mdash; <strong>раздел 5</strong><br />
+&bull; Понять, почему не стоит повторять запрос в цикле, &mdash; <strong>раздел 6</strong><br />
+&bull; Проверить все ветки, не поднимая своего сервера, &mdash; <strong>раздел 7</strong></blockquote>
+
+<h2>🐢 1. Сервис отвечает тридцать секунд</h2>
+
+<p>В уроке 8.1 Open-Meteo отвечал за доли секунды. Так бывает почти всегда. Но однажды сервис перегружен и отвечает через тридцать секунд. Или не отвечает вовсе: запрос ушёл, а ответа нет.</p>
+
+<p>Что в это время происходит с ботом? Event loop не стоит: запрос через <code>aiohttp</code> отдаёт управление, это мы проверили в уроке 8.1. Борис нажимает кнопки, бот ему отвечает.</p>
+
+<p>А вот хэндлер, который пошёл за погодой, висит. Аня отправила команду и смотрит в пустой чат. Она не знает, что бот ждёт чужой сервис. Для неё бот сломался.</p>
+
+<p>Сколько она будет ждать? Если ничего не настраивать, столько, сколько разрешает <code>aiohttp</code>. Проверим в терминале с окружением проекта:</p>
+
+<pre><code>python -c "import aiohttp; print(aiohttp.client.DEFAULT_TIMEOUT)"</code></pre>
+
+<pre><code>ClientTimeout(total=300, connect=None, sock_read=None, sock_connect=30, ceil_threshold=5)</code></pre>
+
+<p><code>total=300</code> &mdash; общее время на запрос по умолчанию: <strong>300 секунд</strong>, пять минут. Пять минут без ответа &mdash; это уже не &laquo;бот думает&raquo;, а &laquo;бот умер&raquo;. Пользователь закроет чат раньше.</p>
+
+<p>Ждать дольше нескольких секунд погоду, которая нужна для одной строки в утреннем сообщении, бессмысленно. Значит, предел нужно поставить самим.</p>
+
+<blockquote><strong>🔑 Не зависание бота, а зависание хэндлера:</strong><br />
+Медленный сервис не останавливает event loop, но держит хэндлер, который его ждёт. Пользователь, который спросил, остаётся без ответа. По умолчанию <code>aiohttp</code> ждёт до пяти минут.</blockquote>
+
+
+<!-- ═══ ШАГ 2 · text · новый шаг ═══ -->
+
+<h2>⏱ 2. Таймаут: ClientTimeout</h2>
+
+<p>Предел ожидания задаёт объект <code>aiohttp.ClientTimeout</code>. Аргумент <code>total</code> &mdash; сколько секунд разрешено на весь запрос: соединиться, отправить, получить ответ.</p>
+
+<p>Чтобы увидеть, как срабатывает таймаут, сервис должен не успеть. Ждать, пока Open-Meteo начнёт тормозить, мы не будем &mdash; сделаем предел меньше, чем нужно любому сервису: одна тысячная секунды. Создайте в <code>http_lab</code> файл <code>timeout_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+import time
+
+import aiohttp
+
+URL = "https://api.open-meteo.com/v1/forecast"
+PARAMS = {
+    "latitude": 55.79,
+    "longitude": 49.12,
+    "current": "temperature_2m,weather_code",
+}
+TIMEOUT = aiohttp.ClientTimeout(total=0.001)
+
+
+async def main() -&gt; None:
+    start = time.monotonic()
+    try:
+        async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+            async with session.get(URL, params=PARAMS) as response:
+                data = await response.json()
+        print(data["current"])
+    except TimeoutError:
+        print("Не дождались ответа")
+    print(f"прошло: {time.monotonic() - start:.3f} с")
+
+
+asyncio.run(main())</code></pre>
+
+<p>Таймаут передаётся при создании сессии: <code>ClientSession(timeout=TIMEOUT)</code>. Он действует на каждый запрос этой сессии. Превышение предела &mdash; исключение <code>TimeoutError</code>, его и ловим.</p>
+
+<p>Запустите <code>python timeout_demo.py</code>:</p>
+
+<pre><code>Не дождались ответа
+прошло: 0.002 с</code></pre>
+
+<p>Ответ не успел за тысячную долю секунды, и программа не стала ждать: исключение, сообщение, выход. Теперь замените строку с таймаутом на разумную:</p>
+
+<pre><code>TIMEOUT = aiohttp.ClientTimeout(total=5)</code></pre>
+
+<p>И запустите ещё раз:</p>
+
+<pre><code>{'time': '2026-11-01T14:15', 'interval': 900, 'temperature_2m': 3.1, 'weather_code': 0}
+прошло: 0.054 с</code></pre>
+<!-- АВТОР: прогон на учебной копии сервиса с ответом, записанным с Open-Meteo 01.11.2026; у настоящего сервиса &laquo;прошло&raquo; будет 0,07&ndash;0,7 с -->
+
+<p>Ответ уложился в пять секунд &mdash; таймаут ничего не заметил. Предел мешает только тогда, когда сервис не успевает.</p>
+
+<h3>Вы это уже видели</h3>
+
+<p>В уроке 3.4 похожий предел ставила <code>asyncio.wait_for()</code>:</p>
+
+<pre><code>урок 3.4:  await asyncio.wait_for(slow_operation(), timeout=2)
+урок 8.3:  aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))</code></pre>
+
+<p>Принцип тот же: ждём не дольше предела, не успели &mdash; <code>TimeoutError</code>. И исключение то же самое, встроенное. Разница в том, что <code>aiohttp</code> встроила таймаут в себя: оборачивать каждый запрос в <code>wait_for()</code> не нужно.</p>
+
+<p>В уроке 3.4 было обещание: &laquo;в модуле про внешние API таймаут станет обязательной частью каждого запроса&raquo;. Этот модуль наступил.</p>
+
+<blockquote><strong>💡 Таймаут для одного запроса:</strong><br />
+<code>session.get()</code> тоже принимает <code>timeout=</code>, и тогда предел действует только на этот запрос. Нам удобнее общий: все запросы к погоде ждём одинаково.</blockquote>
+
+<blockquote><strong>🔑 Ждём не дольше, чем решили сами:</strong><br />
+<code>ClientTimeout(total=5)</code>, переданный в <code>ClientSession(timeout=...)</code>, ограничивает каждый запрос пятью секундами. Не успел &mdash; <code>TimeoutError</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 3 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Нужно, чтобы каждый запрос сессии ждал ответа не дольше 5 секунд. Какая запись это делает?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li><code>aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))</code> ✅</li>
+	<li><code>aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5000))</code></li>
+	<li><code>await response.json(timeout=5)</code></li>
+	<li><code>asyncio.run(main(), timeout=5)</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Предел задаётся в секундах и передаётся при создании сессии. Для одного запроса его можно передать и в <code>session.get(..., timeout=...)</code>.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Посмотрите на <code>timeout_demo.py</code>: в какую строку передан <code>TIMEOUT</code>? В каких единицах записано <code>total=0.001</code> &mdash; секундах или миллисекундах?</p>
+
+
+<!-- ═══ ШАГ 4 · text · новый шаг ═══ -->
+
+<h2>🗂 3. Каталог отказов</h2>
+
+<p>Таймаут &mdash; не единственное, что может случиться с запросом. Соберём все отказы, которые встретятся боту, и каждый получим запуском. Нужна одна программа, которой можно сказать, какой отказ устроить.</p>
+
+<p>Создайте <code>fail_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+import sys
+
+import aiohttp
+
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+PARAMS = {
+    "latitude": 55.79,
+    "longitude": 49.12,
+    "current": "temperature_2m,weather_code",
+}
+BAD_PARAMS = {"latitude": 55.79, "longitude": 49.12, "current": "temperatura"}
+CASES = {
+    "slow": (FORECAST_URL, PARAMS, 0.001),
+    "offline": ("https://api.open-meteo.invalid/v1/forecast", PARAMS, 5),
+    "html": ("https://open-meteo.com/", {}, 5),
+    "404": ("https://api.open-meteo.com/v1/forecat", PARAMS, 5),
+    "400": (FORECAST_URL, BAD_PARAMS, 5),
+}
+
+
+async def main(case: str) -&gt; None:
+    url, params, seconds = CASES[case]
+    timeout = aiohttp.ClientTimeout(total=seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, params=params) as response:
+            print("статус:", response.status)
+            data = await response.json()
+    print(data)
+
+
+asyncio.run(main(sys.argv[1]))</code></pre>
+
+<p>В словаре <code>CASES</code> пять сценариев: адрес, параметры и таймаут для каждого. Какой запустить, программа узнаёт из командной строки: <code>sys.argv[1]</code> &mdash; первое слово после имени файла. <code>try</code> здесь нарочно нет: хотим увидеть исключения как есть.</p>
+
+<p>Traceback у сетевых ошибок длинный: большая часть строк &mdash; внутренности <code>asyncio</code> и <code>aiohttp</code>. Как в уроке 1.2, читаем его снизу вверх: последняя строка говорит, <strong>что</strong> случилось, строка с <code>fail_demo.py</code> выше &mdash; <strong>где</strong>. Ниже мы оставили только их.</p>
+
+<h3>Отказ 1. Сервис не успел</h3>
+
+<p>Таймаут в тысячную секунды, как в разделе 2. Запустите <code>python fail_demo.py slow</code>:</p>
+
+<pre><code>Traceback (most recent call last):
+  File "fail_demo.py", line 32, in &lt;module&gt;
+    asyncio.run(main(sys.argv[1]))
+  ...
+  File "fail_demo.py", line 26, in main
+    async with session.get(url, params=params) as response:
+  ...
+TimeoutError</code></pre>
+
+<p>Знакомый <code>TimeoutError</code>. Обратите внимание: у него нет текста после имени. Это пригодится в разделе 4.</p>
+
+<h3>Отказ 2. Сервер не найден</h3>
+
+<p>Адрес <code>api.open-meteo.invalid</code> не существует: домен <code>.invalid</code> зарезервирован как заведомо несуществующий. Для программы это то же самое, что выключенный Wi-Fi: найти сервер не удалось. Запустите <code>python fail_demo.py offline</code>:</p>
+
+<pre><code>Traceback (most recent call last):
+  File "fail_demo.py", line 32, in &lt;module&gt;
+    asyncio.run(main(sys.argv[1]))
+  ...
+  File "fail_demo.py", line 26, in main
+    async with session.get(url, params=params) as response:
+  ...
+aiohttp.client_exceptions.ClientConnectorDNSError: Cannot connect to host api.open-meteo.invalid:443 ssl:default [Name or service not known]</code></pre>
+<!-- АВТОР: на Windows текст в скобках другой: [getaddrinfo failed]; имя исключения то же -->
+
+<p><code>ClientConnectorDNSError</code> &mdash; &laquo;не удалось соединиться: имя хоста не нашлось&raquo;. До запроса дело не дошло. Если вместо имени нет сети вовсе, или сервер не принимает соединения, исключение будет родственным: <code>ClientConnectorError</code>. Его потомок <code>ClientConnectorDNSError</code> мы только что видели.</p>
+
+<h3>Отказ 3. Пришёл не JSON</h3>
+
+<p>Адрес <code>https://open-meteo.com/</code> &mdash; главная страница сайта, а не API. Сервер ответит, но веб-страницей для людей. Так бывает и с настоящими API: при перегрузке вместо данных отдают страницу &laquo;сервис временно недоступен&raquo;. Запустите <code>python fail_demo.py html</code>:</p>
+
+<pre><code>статус: 200
+Traceback (most recent call last):
+  File "fail_demo.py", line 32, in &lt;module&gt;
+    asyncio.run(main(sys.argv[1]))
+  ...
+  File "fail_demo.py", line 28, in main
+    data = await response.json()
+           ^^^^^^^^^^^^^^^^^^^^^
+  ...
+aiohttp.client_exceptions.ContentTypeError: 200, message='Attempt to decode JSON with unexpected mimetype: text/html; charset=utf-8', url='https://open-meteo.com/'</code></pre>
+
+<p>Статус 200 &mdash; сервер считает, что всё хорошо. Но <code>response.json()</code> посмотрел на тип ответа: <code>text/html</code>, а не JSON. И отказался разбирать: <code>ContentTypeError</code>.</p>
+
+<h3>Отказ 4. Город не найден</h3>
+
+<p>Этот отказ вы уже знаете из урока 8.2: геокодер отвечает статусом 200, но без ключа <code>"results"</code>. Исключения здесь нет &mdash; это обычный ответ, и его разбирает <code>parse_city()</code>, возвращая <code>None</code>.</p>
+
+<blockquote><strong>🔑 Каждый отказ &mdash; своё исключение:</strong><br />
+Не успел &mdash; <code>TimeoutError</code>. Не нашёл сервер &mdash; <code>ClientConnectorError</code>. Пришла страница вместо JSON &mdash; <code>ContentTypeError</code>. Город не найден &mdash; не исключение, а ответ без <code>"results"</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 5 · text · новый шаг ═══ -->
+
+<h2>🚦 3. Каталог отказов: ошибки сервера</h2>
+
+<p>Осталось два сценария в <code>CASES</code>: опечатка в адресе (<code>forecat</code> вместо <code>forecast</code>) и неверный параметр, как в уроке 8.1. Запустите <code>python fail_demo.py 404</code>:</p>
+
+<pre><code>статус: 404
+{'reason': 'Not Found', 'error': True}</code></pre>
+
+<p>И <code>python fail_demo.py 400</code>:</p>
+
+<pre><code>статус: 400
+{'error': True, 'reason': 'Invalid value: Cannot initialize SurfacePressureAndHeightVariable&lt;VariableAndPreviousDay, VariableOrSpread&lt;ForecastPressureVariable&gt;, ForecastHeightVariable&gt; from invalid String value temperatura'}</code></pre>
+
+<p>Исключений нет. Программа отработала до конца и напечатала словарь. Статусы &mdash; 404 и 400, &laquo;не найдено&raquo; и &laquo;ошибка в запросе&raquo;, но <code>aiohttp</code> на статус не смотрит: какой ответ пришёл, такой и отдаёт. Open-Meteo присылает ошибки в формате JSON, поэтому <code>json()</code> разобрал их без возражений.</p>
+
+<p>Чем это опасно? Представьте эту ошибку в боте. <code>describe_weather()</code> не найдёт в ответе <code>"current"</code> и вернёт <code>None</code>. В логе это выглядит как &laquo;сервис изменил формат&raquo;, хотя на деле мы ошиблись в адресе. Для геокодера хуже: <code>parse_city()</code> не найдёт <code>"results"</code>, и бот скажет Ане &laquo;город не найден&raquo; про её Казань.</p>
+
+<h3>raise_for_status()</h3>
+
+<p>Нужно, чтобы ответ с ошибкой оставался ошибкой. Для этого у ответа есть метод <code>raise_for_status()</code>: статус 400 и выше &mdash; исключение, иначе ничего. Добавьте в <code>fail_demo.py</code> строку сразу после печати статуса:</p>
+
+<pre><code class="language-python">            print("статус:", response.status)
+            response.raise_for_status()</code></pre>
+
+<p>Запустите <code>python fail_demo.py 404</code> ещё раз:</p>
+
+<pre><code>статус: 404
+Traceback (most recent call last):
+  File "fail_demo.py", line 33, in &lt;module&gt;
+    asyncio.run(main(sys.argv[1]))
+  ...
+  File "fail_demo.py", line 28, in main
+    response.raise_for_status()
+  ...
+aiohttp.client_exceptions.ClientResponseError: 404, message='Not Found', url='https://api.open-meteo.com/v1/forecat?latitude=55.79&amp;longitude=49.12&amp;current=temperature_2m,weather_code'</code></pre>
+
+<p>И <code>python fail_demo.py 400</code>:</p>
+
+<pre><code>статус: 400
+Traceback (most recent call last):
+  File "fail_demo.py", line 33, in &lt;module&gt;
+    asyncio.run(main(sys.argv[1]))
+  ...
+  File "fail_demo.py", line 28, in main
+    response.raise_for_status()
+  ...
+aiohttp.client_exceptions.ClientResponseError: 400, message='Bad Request', url='https://api.open-meteo.com/v1/forecast?latitude=55.79&amp;longitude=49.12&amp;current=temperatura'</code></pre>
+
+<p>Теперь каждый ответ с ошибкой &mdash; исключение <code>ClientResponseError</code>. В нём код статуса, его название и адрес. Так же поведёт себя и ответ 500 &laquo;сервер сломался&raquo;: на ошибку сервера Open-Meteo вызвать нарочно нельзя, но для <code>raise_for_status()</code> 500 ничем не отличается от 404 &mdash; оба 400 и выше.</p>
+
+<h3>Кто кому родственник</h3>
+
+<p>Отказов пять, исключений четыре. Ловить их по одному было бы долго. Но у трёх из них общий предок: <code>aiohttp.ClientError</code>. Проверим через <code>issubclass()</code> &mdash; &laquo;является ли этот класс потомком того&raquo;. Создайте <code>hierarchy_demo.py</code>:</p>
+
+<pre><code class="language-python">import aiohttp
+
+errors = [
+    aiohttp.ClientConnectorError,
+    aiohttp.ClientResponseError,
+    aiohttp.ContentTypeError,
+    TimeoutError,
+]
+for error in errors:
+    print(error.__name__, issubclass(error, aiohttp.ClientError))</code></pre>
+
+<pre><code>ClientConnectorError True
+ClientResponseError True
+ContentTypeError True
+TimeoutError False</code></pre>
+
+<pre><code>aiohttp.ClientError
+├── ClientConnectorError        сервер не найден, соединения нет
+└── ClientResponseError         ответ со статусом 400 и выше
+    └── ContentTypeError        пришёл не JSON
+
+TimeoutError                    не успел &mdash; встроенное, отдельно</code></pre>
+
+<p>Значит, все отказы покрывают два типа: <code>aiohttp.ClientError</code> и <code>TimeoutError</code>. Это и понадобится в разделе 4.</p>
+
+<blockquote><strong>🔑 Ошибка сервера &mdash; не данные:</strong><br />
+Без <code>raise_for_status()</code> ответ 404 или 400 разбирается как обычный JSON и дальше выглядит как &laquo;формат не тот&raquo; или &laquo;города нет&raquo;. С ним он становится <code>ClientResponseError</code>.</blockquote>
+
+
+<!-- ═══ ШАГ 6 · matching · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Сопоставьте отказ и то, чем он проявится в коде с <code>raise_for_status()</code>.</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: сопоставление) ↓ -->
+
+<ol>
+	<li>Сервис не ответил за отведённые 5 секунд &rarr; <code>TimeoutError</code></li>
+	<li>Сервер по адресу не найден, сети нет &rarr; <code>aiohttp.ClientConnectorError</code></li>
+	<li>Сервер ответил статусом 404 или 500 &rarr; <code>aiohttp.ClientResponseError</code></li>
+	<li>Вместо JSON пришла веб-страница &rarr; <code>aiohttp.ContentTypeError</code></li>
+	<li>Геокодер не нашёл город &rarr; исключения нет: в ответе нет ключа <code>"results"</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Первые четыре &mdash; исключения, последний &mdash; обычный ответ, его разбирает <code>parse_city()</code>.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните последние строки traceback в каталоге отказов. Какой отказ случается до запроса, какой &mdash; после ответа, а какой вовсе не исключение?</p>
+
+
+<!-- ═══ ШАГ 7 · text · новый шаг ═══ -->
+
+<h2>🧰 4. get_weather(): одна функция на все отказы</h2>
+
+<p>Каталог собран. Теперь напишем функцию, которую будет вызывать бот. Правило из урока 2.6: ловим только то, что ожидаем и умеем обработать. Голый <code>except:</code> запрещён, а пользователю &mdash; понятный ответ, себе &mdash; запись в лог.</p>
+
+<p>Ожидаем мы ровно каталог из раздела 3. Обработать умеем одним способом: погоды не будет, вернём <code>None</code>.</p>
+
+<h3>Шаг 1. weather_net.py</h3>
+
+<p>Создайте в <code>http_lab</code> файл <code>weather_net.py</code>:</p>
+
+<pre><code class="language-python">"""Запросы к Open-Meteo."""
+import logging
+
+import aiohttp
+
+from weather_parse import describe_weather, parse_city
+
+GEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+logger = logging.getLogger(__name__)
+
+
+async def get_json(url: str, params: dict) -&gt; dict:
+    async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+        async with session.get(url, params=params) as response:
+            response.raise_for_status()
+            return await response.json()
+
+
+async def get_weather(city: str) -&gt; str | None:
+    try:
+        geo_params = {"name": city, "count": 1, "language": "ru"}
+        geo = await get_json(GEO_URL, geo_params)
+        coords = parse_city(geo)
+        if coords is None:
+            logger.info("Город не найден: %s", city)
+            return None
+
+        latitude, longitude = coords
+        params = {
+            "latitude": latitude,
+            "longitude": longitude,
+            "current": "temperature_2m,weather_code",
+        }
+        forecast = await get_json(FORECAST_URL, params)
+    except (aiohttp.ClientError, TimeoutError) as error:
+        name = type(error).__name__
+        logger.warning("Погода для %s недоступна: %s", city, name)
+        return None
+
+    weather = describe_weather(forecast)
+    if weather is None:
+        logger.warning("Неожиданный ответ прогноза для %s", city)
+    return weather</code></pre>
+
+<p>Разберём по частям.</p>
+
+<h3>get_json(): таймаут и статус для каждого запроса</h3>
+
+<p>Это функция <code>get_json()</code> из урока 8.2 с двумя добавками: <code>timeout=TIMEOUT</code> у сессии и <code>raise_for_status()</code> у ответа. Обе живут здесь, а не в <code>get_weather()</code>: так любой запрос через <code>get_json()</code> получает их сам, забыть невозможно.</p>
+
+<h3>get_weather(): что внутри try</h3>
+
+<p>В <code>try</code> &mdash; оба запроса: геокодер и прогноз. Любой из них может отказать, и любой отказ ведёт к одному исходу.</p>
+
+<pre><code>except (aiohttp.ClientError, TimeoutError) as error:</code></pre>
+
+<p>Два типа в скобках &mdash; кортеж: <code>except</code> ловит любой из них. Это ровно два предка из раздела 3. <code>as error</code> сохраняет пойманное исключение в переменную, чтобы записать в лог, что именно случилось.</p>
+
+<h3>Лог: имя исключения</h3>
+
+<pre><code>name = type(error).__name__
+logger.warning("Погода для %s недоступна: %s", city, name)</code></pre>
+
+<p>В лог пишем имя класса исключения: <code>TimeoutError</code>, <code>ClientResponseError</code>. Почему не текст ошибки? Помните, в разделе 3 у <code>TimeoutError</code> не было текста &mdash; в логе осталась бы пустота. Логгер &mdash; знакомый с урока 1.2 <code>logging.getLogger(__name__)</code>.</p>
+
+<h3>Три пути к None</h3>
+
+<ul>
+	<li>Город не найден &mdash; <code>parse_city()</code> вернула <code>None</code>. Это не отказ сервиса, в лог &mdash; <code>info</code>.</li>
+	<li>Сервис отказал &mdash; исключение поймано, в лог &mdash; <code>warning</code> с именем исключения.</li>
+	<li>Ответ пришёл, но не того формата, &mdash; <code>describe_weather()</code> вернула <code>None</code>, в лог &mdash; <code>warning</code>.</li>
+</ul>
+
+<p>Для вызывающего кода все три одинаковы: погоды нет. Различать их нужно нам, а не Ане, &mdash; для этого лог.</p>
+
+<h3>Шаг 2. Чего ловить нельзя</h3>
+
+<p>Соблазн написать короче велик:</p>
+
+<pre><code class="language-python">    except Exception:
+        pass</code></pre>
+
+<p>Проверим, к чему это приводит. Замените на время в <code>weather_net.py</code> строку <code>except (aiohttp.ClientError, TimeoutError) as error:</code> и три строки под ней на эти две. И сделайте опечатку, какую легко сделать в жизни: в строке с прогнозом напишите <code>FORECST_URL</code> вместо <code>FORECAST_URL</code>. Вызовите функцию:</p>
+
+<pre><code>python -c "import asyncio, weather_net; print(asyncio.run(weather_net.get_weather('Казань')))"</code></pre>
+
+<pre><code>Traceback (most recent call last):
+  File "&lt;string&gt;", line 1, in &lt;module&gt;
+  ...
+  File "weather_net.py", line 41, in get_weather
+    weather = describe_weather(forecast)
+                               ^^^^^^^^
+UnboundLocalError: cannot access local variable 'forecast' where it is not associated with a value</code></pre>
+
+<p>Ошибка всплыла, но не там и не та. <code>except Exception</code> проглотил <code>NameError</code> от опечатки, <code>pass</code> ничего не записал в лог, а функция пошла дальше. Строкой ниже переменной <code>forecast</code> нет &mdash; и вот <code>UnboundLocalError</code>, по которому опечатку не найти. Хуже того: если бы ниже не было обращения к <code>forecast</code>, ошибки не было бы вовсе. Бот бы молча никогда не показывал погоду.</p>
+
+<p>Верните правильный <code>except</code>, опечатку оставьте и вызовите ещё раз:</p>
+
+<pre><code>Traceback (most recent call last):
+  File "&lt;string&gt;", line 1, in &lt;module&gt;
+  ...
+  File "weather_net.py", line 37, in get_weather
+    forecast = await get_json(FORECST_URL, params)
+                              ^^^^^^^^^^^
+NameError: name 'FORECST_URL' is not defined. Did you mean: 'FORECAST_URL'?</code></pre>
+
+<p>Теперь опечатку не поймали: <code>NameError</code> &mdash; не сетевая ошибка, её нет в нашем списке. Python показал точное место и даже подсказал правильное имя. Исправьте опечатку.</p>
+
+<p>Так работает правило &laquo;ловим только ожидаемое&raquo;. Отказ сервиса &mdash; ожидаем, обрабатываем. Ошибка в нашем коде &mdash; не ожидаем, она должна упасть громко, чтобы мы её увидели. Кроме того, <code>except Exception</code> поймал бы и то, что ловить нельзя по уроку 2.6, вроде <code>KeyboardInterrupt</code> или <code>asyncio.CancelledError</code> при остановке бота.</p>
+
+<blockquote><strong>🔑 Отказ сервиса превращается в None, ошибка кода &mdash; нет:</strong><br />
+<code>except (aiohttp.ClientError, TimeoutError)</code> ловит ровно каталог отказов. Всё остальное &mdash; опечатки, ошибки логики &mdash; падает с честным traceback.</blockquote>
+
+
+<!-- ═══ ШАГ 8 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Open-Meteo завис и не отвечает. <code>TIMEOUT</code> в <code>weather_net.py</code> &mdash; 5 секунд. Что произойдёт при вызове <code>await get_weather("Казань")</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Примерно через 5 секунд функция вернёт <code>None</code>, а в логе появится <code>WARNING</code> с <code>TimeoutError</code> ✅</li>
+	<li>Через 5 секунд функция выбросит <code>TimeoutError</code>, и хэндлер упадёт</li>
+	<li>Функция будет ждать, пока сервис не ответит</li>
+	<li>Функция сразу вернёт строку <code>"Погоду узнать не удалось."</code></li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. <code>TimeoutError</code> пойман в <code>get_weather()</code> и превращён в <code>None</code>. Какой текст показать пользователю, решает вызывающий код.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Найдите в <code>get_weather()</code> строку <code>except</code>. Есть ли среди типов <code>TimeoutError</code>? Что функция делает после записи в лог? А текст для пользователя &mdash; есть ли он в <code>weather_net.py</code>?</p>
+
+
+<!-- ═══ ШАГ 9 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> Почему в <code>get_weather()</code> нельзя заменить <code>except (aiohttp.ClientError, TimeoutError) as error:</code> на <code>except Exception: pass</code>?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Он проглотит и ошибки нашего кода, например опечатку, и не оставит записи в логе ✅</li>
+	<li><code>except Exception</code> не ловит <code>TimeoutError</code></li>
+	<li><code>pass</code> внутри асинхронной функции запрещён</li>
+	<li>Так можно, разница только в длине записи</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Правило урока 2.6: <code>except Exception</code> допустим только как страховка и только с логом. А в <code>get_weather()</code> мы знаем, какие отказы ждём, &mdash; их и ловим.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Вспомните опыт с <code>FORECST_URL</code> в разделе 4. Какое исключение получилось с <code>except Exception: pass</code> и помогло ли оно найти опечатку?</p>
+
+
+<!-- ═══ ШАГ 10 · text · новый шаг ═══ -->
+
+<h2>🪧 5. Заглушка вместо молчания</h2>
+
+<p><code>get_weather()</code> вернула <code>None</code>. Что теперь написать Ане?</p>
+
+<p>Два плохих варианта мы уже отбросили. Упасть &mdash; Аня не получит ничего. Промолчать о погоде, будто её и не было, &mdash; Аня не поймёт, почему сегодня сообщение другое. Хороший вариант &mdash; сказать честно и отправить остальное: привычки на сегодня от погоды не зависят.</p>
+
+<p>Посмотрим, как это выглядит. Создайте <code>morning_demo.py</code> &mdash; набросок утреннего сообщения:</p>
+
+<pre><code class="language-python">import asyncio
+import logging
+
+import aiohttp
+
+import weather_net
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+WEATHER_FAILED = "Погоду узнать не удалось."
+
+
+async def morning_preview(city: str, habits: list[str]) -&gt; str:
+    weather = await weather_net.get_weather(city)
+    if weather is None:
+        weather_line = WEATHER_FAILED
+    else:
+        weather_line = f"Погода: {weather}."
+
+    lines = ["Доброе утро!", weather_line, "", "Ваши привычки на сегодня:"]
+    for name in habits:
+        lines.append(f"⬜ {name}")
+    return "\n".join(lines)
+
+
+async def main() -&gt; None:
+    habits = ["Зарядка", "Чтение"]
+    print(await morning_preview("Казань", habits))
+    print()
+
+    weather_net.TIMEOUT = aiohttp.ClientTimeout(total=0.001)
+    print(await morning_preview("Казань", habits))
+
+
+asyncio.run(main())</code></pre>
+
+<p><code>morning_preview()</code> вызывает <code>get_weather()</code> и выбирает строку: погода или заглушка <code>WEATHER_FAILED</code>. Остальное сообщение собирается одинаково. Во второй раз мы подменили таймаут на тысячную секунды, как в разделе 2, чтобы сервис гарантированно не успел. <code>logging.basicConfig()</code> включает вывод лога в терминал.</p>
+
+<p>Запустите <code>python morning_demo.py</code>:</p>
+
+<pre><code>Доброе утро!
+Погода: +3, ясно.
+
+Ваши привычки на сегодня:
+⬜ Зарядка
+⬜ Чтение
+
+WARNING Погода для Казань недоступна: TimeoutError
+Доброе утро!
+Погоду узнать не удалось.
+
+Ваши привычки на сегодня:
+⬜ Зарядка
+⬜ Чтение</code></pre>
+
+<p>Оба сообщения дошли. Во втором вместо погоды &mdash; честная фраза, а привычки на месте. В терминале &mdash; строка <code>WARNING</code>: Аня её не видит, а мы знаем, что случилось.</p>
+
+<p>Это знакомая форма. В уроке 6.3 неправильный ответ в диалоге не ронял бота: проверка возвращала <code>None</code>, хэндлер отвечал понятной ошибкой, и сценарий продолжался. Отказ сервиса &mdash; такая же обычная ветка сценария, как ошибка ввода. Её не надо бояться, её надо предусмотреть.</p>
+
+<pre><code>урок 6.3:  parse_time("вечером")  &rarr;  None  &rarr;  texts.ERR_TIME
+урок 8.3:  get_weather("Казань")  &rarr;  None  &rarr;  WEATHER_FAILED</code></pre>
+
+<p>В практикуме 8.4 <code>WEATHER_FAILED</code> переедет в <code>texts.py</code>, а набросок станет настоящей функцией утреннего сообщения.</p>
+
+<blockquote><strong>🔑 Отказ сервиса &mdash; обычная ветка:</strong><br />
+<code>None</code> от <code>get_weather()</code> превращается в заглушку, а остальное сообщение уходит как обычно. Бот не молчит и не падает.</blockquote>
+
+
+<!-- ═══ ШАГ 11 · text · новый шаг ═══ -->
+
+<h2>🔁 6. Почему не повторять запрос в цикле</h2>
+
+<p>Естественная мысль: не получилось с первого раза &mdash; попробуем ещё. Три попытки в цикле, и погода почти всегда найдётся.</p>
+
+<p>Посчитаем, что это даст, когда сервис лежит. Таймаут &mdash; 5 секунд. Первая попытка ждёт 5 секунд и падает. Вторая &mdash; ещё 5. Третья &mdash; ещё 5.</p>
+
+<pre><code>попыток   ждёт Аня, если сервис лежит
+   1              5 с
+   3             15 с
+   5             25 с</code></pre>
+
+<p>Если сервис лёг, он не встанет через пять секунд. Повтор ничего не исправляет &mdash; он только растягивает ожидание. Вместо &laquo;погоду узнать не удалось&raquo; через 5 секунд Аня получит ту же фразу через 15.</p>
+
+<p>Повтор помогает в другом случае: когда отказ случайный &mdash; один пакет потерялся, сервер на мгновение был занят. Для таких случаев в серьёзных системах повторяют запрос с растущей паузой и ограниченным числом попыток. Для строки погоды в утреннем сообщении это лишнее: завтра утром бот спросит снова.</p>
+
+<blockquote><strong>🔑 Повтор при недоступном сервисе только удлиняет ожидание:</strong><br />
+Одна попытка с разумным таймаутом и честная заглушка лучше трёх попыток, после которых пользователь получит ту же заглушку втрое позже.</blockquote>
+
+
+<!-- ═══ ШАГ 12 · choice · новый шаг ═══ -->
+
+<h3>🧪 Задание</h3>
+
+<p><strong>Вопрос:</strong> В <code>get_weather()</code> добавили цикл: при отказе запрос повторяется, всего 3 попытки. Таймаут &mdash; 5 секунд. Сервис полностью лежит и не отвечает. Через сколько Аня увидит &laquo;Погоду узнать не удалось&raquo;?</p>
+
+<!-- ↓ варианты и отзывы &mdash; в поля Stepik (тип: один ответ) ↓ -->
+
+<ol>
+	<li>Примерно через 15 секунд: каждая из трёх попыток ждёт свои 5 секунд ✅</li>
+	<li>Примерно через 5 секунд: таймаут общий на все попытки</li>
+	<li>Никогда: цикл будет повторять запрос, пока сервис не ответит</li>
+	<li>Сразу: после первого отказа повторы не нужны</li>
+</ol>
+
+<p><strong>Отзыв на верный ответ:</strong><br />
+Верно. Таймаут действует на каждый запрос отдельно. Три попытки &mdash; три ожидания подряд, а результат тот же.</p>
+
+<p><strong>Подсказка при неверном ответе:</strong><br />
+Таймаут в <code>ClientSession(timeout=...)</code> ограничивает каждый запрос. Сколько запросов сделает цикл и сколько ждёт каждый?</p>
+
+
+<!-- ═══ ШАГ 13 · text · новый шаг ═══ -->
+
+<h2>🧪 7. Проверка всех веток без своего сервера</h2>
+
+<p>У <code>get_weather()</code> шесть исходов: погода, город не найден и четыре отказа. Как убедиться, что каждый ведёт себя как задумано? Ждать, пока Open-Meteo сломается, не будем. И поднимать свой сервер, который отвечает ошибками, тоже не нужно.</p>
+
+<p>Каждый отказ из раздела 3 мы устраивали одним значением: адресом или таймаутом. В <code>weather_net.py</code> и адреса, и таймаут &mdash; константы модуля. <code>get_json()</code> читает <code>TIMEOUT</code> в момент вызова, <code>get_weather()</code> так же читает <code>FORECAST_URL</code>. Значит, можно подменить константу и вызвать функцию.</p>
+
+<p>Создайте <code>check_demo.py</code>:</p>
+
+<pre><code class="language-python">import asyncio
+import logging
+
+import aiohttp
+
+import weather_net
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+
+async def check(title: str, city: str = "Казань") -&gt; None:
+    result = await weather_net.get_weather(city)
+    print(f"{title}: {result!r}")
+    print()
+
+
+async def main() -&gt; None:
+    await check("всё в порядке")
+    await check("города нет", "Привычкоград")
+
+    weather_net.TIMEOUT = aiohttp.ClientTimeout(total=0.001)
+    await check("сервис не успел")
+    weather_net.TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+    weather_net.FORECAST_URL = "https://api.open-meteo.invalid/v1/forecast"
+    await check("адреса нет")
+
+    weather_net.FORECAST_URL = "https://api.open-meteo.com/v1/forecat"
+    await check("ошибка 404")
+
+    weather_net.FORECAST_URL = "https://open-meteo.com/"
+    await check("пришёл не JSON")
+
+
+asyncio.run(main())</code></pre>
+
+<p>Запись <code>weather_net.TIMEOUT = ...</code> меняет константу внутри модуля <code>weather_net</code>, и следующий вызов увидит новое значение. После проверки таймаута возвращаем пять секунд, иначе дальше не успел бы ни один запрос. <code>!r</code> в f-строке печатает значение в кавычках, как <code>repr()</code>: так строка отличается от <code>None</code>.</p>
+
+<p>Запустите <code>python check_demo.py</code>:</p>
+
+<pre><code>всё в порядке: '+3, ясно'
+
+INFO Город не найден: Привычкоград
+города нет: None
+
+WARNING Погода для Казань недоступна: TimeoutError
+сервис не успел: None
+
+WARNING Погода для Казань недоступна: ClientConnectorDNSError
+адреса нет: None
+
+WARNING Погода для Казань недоступна: ClientResponseError
+ошибка 404: None
+
+WARNING Погода для Казань недоступна: ContentTypeError
+пришёл не JSON: None</code></pre>
+
+<p>Каждая ветка сработала как задумано:</p>
+
+<ul>
+	<li>Первый вызов вернул строку погоды.</li>
+	<li>Остальные вернули <code>None</code>, и ни один не уронил программу.</li>
+	<li>Строка в логе разная для каждого случая: по ней видно, что именно случилось.</li>
+	<li>&laquo;Города нет&raquo; записан как <code>INFO</code>, а отказы сервиса &mdash; как <code>WARNING</code>.</li>
+</ul>
+
+<p>Подмена константы в проверке &mdash; не обман. Мы не меняли код <code>get_weather()</code>: проверяли ту самую функцию, которую получит бот. Изменилось только то, что приходит снаружи.</p>
+
+<blockquote><strong>🔑 Отказ можно устроить одной константой:</strong><br />
+Несуществующий адрес, опечатка в пути, страница вместо API, таймаут в тысячную секунды &mdash; каждая ветка проверяется без своего сервера и без ожидания, пока сервис сломается.</blockquote>
+
+
+<!-- ═══ ШАГ 14 · text · новый шаг ═══ -->
+
+<h2>📋 Итог урока 8.3</h2>
+
+<p>В <code>http_lab</code> рядом с <code>weather_parse.py</code> появился <code>weather_net.py</code>. Его <code>get_weather()</code> возвращает погоду или <code>None</code>, ждёт не дольше пяти секунд и не роняет бота ни при одном отказе сервиса.</p>
+
+<ul>
+	<li>✅ Медленный сервис держит хэндлер, а не event loop; по умолчанию <code>aiohttp</code> ждёт 300 секунд</li>
+	<li>✅ <code>ClientTimeout(total=5)</code> в <code>ClientSession(timeout=...)</code> &mdash; предел на каждый запрос; превышение &mdash; <code>TimeoutError</code>, как у <code>wait_for()</code></li>
+	<li>✅ Отказы: <code>TimeoutError</code>, <code>ClientConnectorError</code>, <code>ClientResponseError</code>, <code>ContentTypeError</code>; город не найден &mdash; не исключение</li>
+	<li>✅ Без <code>raise_for_status()</code> ответ 404 разбирается как данные</li>
+	<li>✅ <code>except (aiohttp.ClientError, TimeoutError)</code> ловит весь каталог; опечатки в коде падают громко</li>
+	<li>✅ <code>except Exception: pass</code> прячет баги &mdash; правило 2.6</li>
+	<li>✅ <code>None</code> &rarr; заглушка &laquo;Погоду узнать не удалось&raquo;, остальное сообщение уходит как обычно</li>
+	<li>✅ Повтор при лежащем сервисе только удлиняет ожидание</li>
+	<li>✅ Ветки проверяются подменой константы: адрес или таймаут</li>
+</ul>
+
+<h3>📝 Шпаргалка</h3>
+
+<table border="1" cellpadding="10" cellspacing="0">
+	<tbody>
+		<tr>
+			<th>Запись</th>
+			<th>Что делает</th>
+		</tr>
+		<tr>
+			<td><code>TIMEOUT = aiohttp.ClientTimeout(total=5)</code></td>
+			<td>Не больше 5 секунд на запрос</td>
+		</tr>
+		<tr>
+			<td><code>aiohttp.ClientSession(timeout=TIMEOUT)</code></td>
+			<td>Таймаут для всех запросов сессии</td>
+		</tr>
+		<tr>
+			<td><code>response.raise_for_status()</code></td>
+			<td>Статус 400 и выше &rarr; <code>ClientResponseError</code></td>
+		</tr>
+		<tr>
+			<td><code>except (aiohttp.ClientError, TimeoutError) as error:</code></td>
+			<td>Поймать любой отказ сервиса</td>
+		</tr>
+		<tr>
+			<td><code>type(error).__name__</code></td>
+			<td>Имя исключения для лога</td>
+		</tr>
+		<tr>
+			<td><code>logger.warning("...: %s", name)</code></td>
+			<td>Записать отказ в лог</td>
+		</tr>
+		<tr>
+			<td><code>weather_net.TIMEOUT = aiohttp.ClientTimeout(total=0.001)</code></td>
+			<td>Устроить таймаут для проверки</td>
+		</tr>
+	</tbody>
+</table>
+
+<blockquote><strong>📌 Что сохранить:</strong><br />
+<code>weather_parse.py</code> и <code>weather_net.py</code> &mdash; заготовки для проекта. В практикуме 8.4 они станут одним файлом <code>weather.py</code>. Остальные файлы <code>http_lab</code> &mdash; учебные.</blockquote>
+
+<h3>⏭ Что дальше?</h3>
+
+<p>У нас есть всё, чтобы узнать погоду: запрос, разбор, защита от отказов. Но всё это живёт в лаборатории, а ПривычкаБот о погоде пока не знает. Он даже не знает, в каком городе живёт Аня.</p>
+
+<p>В практикуме 8.4 перенесём <code>weather.py</code> в проект, научим бота запоминать город командой <code>/city</code> и соберём утреннее сообщение &mdash; с погодой, когда она есть, и с заглушкой, когда сервис молчит.</p>

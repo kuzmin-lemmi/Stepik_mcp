@@ -166,6 +166,16 @@ class PullCourseTests(unittest.TestCase):
         self.assertIn("Авторы: Автор", info)
         self.assertIn("Длинное **описание**", info)
         self.assertEqual((self.folder / "CLAUDE.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
+        for name in ("COURSE_STYLE.md", "rules/REVIEW_RULES.md", "sessions/HANDOFF_TEMPLATE.md"):
+            self.assertTrue((self.folder / name).is_file(), name)
+        self.assertIn("Editorial workflow", (self.folder / "AGENTS.md").read_text(encoding="utf-8"))
+
+    def test_rule_files_are_not_overwritten(self):
+        sw.pull_course(self.client, 1)
+        style = self.folder / "COURSE_STYLE.md"
+        style.write_text("Правила автора", encoding="utf-8")
+        sw.pull_course(self.client, 1)
+        self.assertEqual(style.read_text(encoding="utf-8"), "Правила автора")
 
     def test_pull_keeps_existing_files_and_adds_new_lessons(self):
         sw.cache_lesson(self.client, 1, "1.1")
@@ -185,5 +195,5 @@ class PullCourseTests(unittest.TestCase):
         self.data["units"][1]["position"], self.data["units"][0]["position"] = 1, 2
         result = sw.pull_course(self.client, 1)
         self.assertEqual(result["moved_on_stepik"], ["1.1", "1.2"])
-        self.assertEqual(len(list(self.folder.glob("*/*.md"))), 2)
+        self.assertEqual(len(list(self.folder.glob("*/*-lesson-*.md"))), 2)
         self.assertFalse(any("Renamed" in path.name for path in self.folder.iterdir()))
