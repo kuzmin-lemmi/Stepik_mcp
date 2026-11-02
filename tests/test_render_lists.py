@@ -60,6 +60,33 @@ class ListParagraphTests(unittest.TestCase):
     def test_old_quote_mode_reproduces_format_2(self):
         self.assertEqual(html_to_md("<blockquote><p>x</p></blockquote>", old_quotes=True), "> \n\nx")
 
+    def test_table_kept_as_html(self):
+        # Таблицы терялись при правке шага: в Markdown урока не было их записи.
+        table = '<table border="1"><tbody><tr><td><p>a &lt; b</p></td><td>**x**</td></tr></tbody></table>'
+        markdown = html_to_md(f"<p>до</p>{table}<p>после</p>")
+        self.assertEqual(markdown, f"до\n\n{table}\n\nпосле")
+        self.assertEqual(md_to_html(markdown), f"<p>до</p>\n{table}\n<p>после</p>")
+
+    def test_table_with_blank_lines_stays_one_block(self):
+        markdown = "<table>\n<tr><td>a</td></tr>\n\n# не заголовок\n</table>"
+        self.assertEqual(md_to_html(markdown), markdown)
+
+    def test_details_with_markdown_inside(self):
+        source = ('<details><summary><strong>Ответ</strong></summary><p>Текст <code>x</code></p>'
+                  '<ul><li>один</li></ul></details>')
+        markdown = html_to_md(source)
+        self.assertEqual(markdown, "<details>\n<summary>**Ответ**</summary>\n\nТекст `x`\n\n- один\n\n</details>")
+        self.assertEqual(md_to_html(markdown), '<details><summary><strong>Ответ</strong></summary>'
+                                               '<p>Текст <code>x</code></p>\n<ul><li>один</li></ul></details>')
+
+    def test_details_keeps_attributes_and_works_in_quote(self):
+        source = "<blockquote><p>Q</p><details open><summary>S</summary><p>h</p></details></blockquote>"
+        self.assertEqual(md_to_html(html_to_md(source)),
+                         "<blockquote><p>Q</p>\n<details open><summary>S</summary><p>h</p></details></blockquote>")
+
+    def test_old_blocks_mode_reproduces_format_3(self):
+        self.assertEqual(html_to_md("<table><tr><td>a</td></tr></table>", old_blocks=True), "a")
+
     def test_literal_asterisks_stay_text(self):
         markdown = html_to_md("<p>2**3 и a*b*c</p>")
         self.assertEqual(md_to_html(markdown), "<p>2**3 и a*b*c</p>")

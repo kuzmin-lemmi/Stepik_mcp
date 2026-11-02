@@ -160,7 +160,7 @@ class PublishTests(unittest.TestCase):
     def test_download_saves_step_sources_without_statistics(self):
         saved = json.loads((self.folder / ".stepik" / "steps" / "11.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["block"], {"name": "text", "text": "<p>Theory</p>"})
-        self.assertIn("format: 3", self.lesson.read_text(encoding="utf-8"))
+        self.assertIn(f"format: {steps.FORMAT}", self.lesson.read_text(encoding="utf-8"))
 
     def test_statistics_are_not_saved(self):
         self.data["step-sources"].append({"id": 31, "lesson": 1000, "viewed_by": 5, "passed_by": 2,
@@ -283,7 +283,7 @@ class PublishTests(unittest.TestCase):
                 publish.plan_rollback(self.client, 1, "1.1", name)
 
     def test_old_format_task_edit_asks_for_fresh_download(self):
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "")
+        text = self.lesson.read_text(encoding="utf-8").replace(f"format: {steps.FORMAT}\n", "")
         self.lesson.write_text(text.replace("Question", "Changed"), encoding="utf-8", newline="\n")
         result = publish.plan_push(self.client, 1, "1.1")
         self.assertIn("до появления YAML", next(item for item in result["skipped"] if item.get("step_id") == 12)["reason"])
@@ -292,7 +292,7 @@ class PublishTests(unittest.TestCase):
         self.remote(11)["block"]["text"] = "<ul><li><p>a</p></li></ul>"
         self.remote(11)["update_date"] = "2000-01-01T00:00:00Z"
         (self.folder / ".stepik" / "steps" / "11.json").unlink()
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "")
+        text = self.lesson.read_text(encoding="utf-8").replace(f"format: {steps.FORMAT}\n", "")
         self.lesson.write_text(text.replace("\nTheory\n", "\n- \n\na\n"), encoding="utf-8", newline="\n")
         self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
         self.edit("\na\n", "\nb\n")
@@ -300,7 +300,7 @@ class PublishTests(unittest.TestCase):
         self.assertIn("старой версией", result["skipped"][0]["reason"])
 
     def test_old_file_with_unclosed_fence_keeps_all_steps(self):
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "")
+        text = self.lesson.read_text(encoding="utf-8").replace(f"format: {steps.FORMAT}\n", "")
         self.lesson.write_text(text.replace("\nTheory\n", "\nTheory\n\n```\n"), encoding="utf-8", newline="\n")
         self.assertEqual([entry["step_id"] for entry in publish.parse_lesson(self.lesson.read_text(encoding="utf-8"))],
                          [11, 12, 13])
@@ -379,7 +379,7 @@ class PublishTests(unittest.TestCase):
         self.remote(11)["block"]["text"] = "<blockquote><p>Итог</p></blockquote>"
         self.remote(11)["update_date"] = "2000-01-01T00:00:00Z"
         (self.folder / ".stepik" / "steps" / "11.json").unlink()
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "format: 2\n")
+        text = self.lesson.read_text(encoding="utf-8").replace(f"format: {steps.FORMAT}\n", "format: 2\n")
         self.lesson.write_text(text.replace("\nTheory\n", "\n> \n\nИтог\n"), encoding="utf-8", newline="\n")
         self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
         self.edit("\nИтог\n", "\nИтог 2\n")
@@ -387,11 +387,30 @@ class PublishTests(unittest.TestCase):
         self.assertIn("врезки", result["skipped"][0]["reason"])
         self.assert_no_writes()
 
+    def test_format_3_file_with_table(self):
+        # Файлы формата 3 показывали таблицу текстом ячеек.
+        self.remote(11)["block"]["text"] = "<table><tr><td>Итог</td></tr></table>"
+        self.remote(11)["update_date"] = "2000-01-01T00:00:00Z"
+        (self.folder / ".stepik" / "steps" / "11.json").unlink()
+        text = self.lesson.read_text(encoding="utf-8").replace(f"format: {steps.FORMAT}\n", "format: 3\n")
+        self.lesson.write_text(text.replace("\nTheory\n", "\nИтог\n"), encoding="utf-8", newline="\n")
+        self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
+        self.edit("\nИтог\n", "\nИтог 2\n")
+        result = publish.plan_push(self.client, 1, "1.1")
+        self.assertIn("скачайте урок заново", result["skipped"][0]["reason"])
+        self.assert_no_writes()
+
     def test_structure_change_is_reported(self):
         html = "<ul><li><blockquote><p>x</p></blockquote></li></ul>"
         self.assertTrue(publish.structure_changes(html))
         self.assertFalse(publish.structure_changes("<ul><li><p>a</p></li></ul><blockquote><p>b</p></blockquote>"))
         self.assertIn("структура блоков", publish._edit_losses(html)[-1])
+
+    def test_tables_and_details_are_not_lost(self):
+        html = ('<table style="width:100%"><tr><td><a href="x">a</a></td></tr></table>'
+                '<details open><summary>S</summary><p>b</p></details>')
+        self.assertEqual(publish._edit_losses(html), [])
+        self.assertTrue(publish._lossy_features("<details><summary class='s'>S</summary></details>"))
 
     def test_empty_allowlist_by_default(self):
         with patch.dict(os.environ, {"ALLOWED_WRITE_COURSES": ""}):

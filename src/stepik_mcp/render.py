@@ -19,12 +19,16 @@ class _Md(HTMLParser):
     BLOCK = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
              "ul", "ol", "li", "pre", "blockquote", "table", "tr"}
 
-    def __init__(self, legacy=False, old_quotes=False):
+    def __init__(self, legacy=False, old_quotes=False, old_blocks=False):
         super().__init__(convert_charrefs=True)
         # legacy=True повторяет вывод до исправления списков (формат 1), old_quotes —
-        # до исправления цитат (формат 2): так скачаны старые файлы уроков.
+        # до исправления цитат (формат 2), old_blocks — до таблиц и спойлеров
+        # (формат 3): так скачаны старые файлы уроков.
         self.legacy = legacy
         self.old_quotes = legacy or old_quotes
+        self.old_blocks = self.old_quotes or old_blocks
+        self.table_depth = 0      # >0 — внутри таблицы, её HTML копируется как есть
+        self.table_html = []
         self.quote_starts = []    # индексы self.parts, где начались открытые цитаты
         self.item_fresh = False   # только что выведен маркер пункта списка
         self.parts = []
@@ -53,6 +57,26 @@ class _Md(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
+        if self.table_depth:
+            self.table_depth += tag == "table"
+            self.table_html.append(self.get_starttag_text())
+            return
+        if tag == "table" and not self.old_blocks and not self.in_pre:
+            # У таблицы нет записи в Markdown без потерь: в файле урока её HTML.
+            self._newline(2)
+            self.table_depth = 1
+            self.table_html = [self.get_starttag_text()]
+            return
+        if tag in ("details", "summary") and not self.old_blocks and not self.in_pre:
+            # Спойлер: <details> и <summary> на своих строках, внутри — обычный Markdown.
+            if tag == "details":
+                self._newline(2)
+                self._emit(self.get_starttag_text() + "\n")
+            else:
+                if not self.parts[-1].endswith("\n"):
+                    self._newline(1)
+                self._emit("<summary>")
+            return
         if self.in_pre and not self.legacy and tag not in ("pre", "code"):
             # Внутри блока кода разметки нет: только текст и переносы строк.
             if tag == "br":
@@ -118,6 +142,22 @@ class _Md(HTMLParser):
                 self.pre_lang = match.group(1)
 
     def handle_endtag(self, tag):
+        if self.table_depth:
+            self.table_html.append(f"</{tag}>")
+            if tag == "table":
+                self.table_depth -= 1
+                if not self.table_depth:
+                    self._emit("".join(self.table_html).strip())
+                    self._newline(2)
+            return
+        if tag in ("details", "summary") and not self.old_blocks and not self.in_pre:
+            if tag == "summary":
+                self._emit("</summary>")
+            else:
+                self._newline(2)
+                self._emit("</details>")
+            self._newline(2)
+            return
         if self.in_pre and not self.legacy and tag not in ("pre", "code"):
             return
         if tag in ("strong", "b"):
@@ -162,8 +202,14 @@ class _Md(HTMLParser):
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
 
+    def handle_comment(self, data):
+        if self.table_depth:
+            self.table_html.append(f"<!--{data}-->")
+
     def handle_data(self, data):
-        if self.in_pre and not self.legacy:
+        if self.table_depth:
+            self.table_html.append(html.escape(data, quote=False))
+        elif self.in_pre and not self.legacy:
             self.pre_text.append(data)
         elif self.in_pre:
             # Прежний вывод: у второго блока кода подряд терялась открывающая ограда.
@@ -195,10 +241,10 @@ def code_fence(text):
     return "`" * max(3, longest + 1)
 
 
-def html_to_md(source, legacy=False, old_quotes=False):
+def html_to_md(source, legacy=False, old_quotes=False, old_blocks=False):
     if not source:
         return ""
-    parser = _Md(legacy=legacy, old_quotes=old_quotes)
+    parser = _Md(legacy=legacy, old_quotes=old_quotes, old_blocks=old_blocks)
     parser.feed(source)
     parser.close()
     return parser.result()
@@ -277,6 +323,8 @@ def md_to_html(markdown):
     Поддержаны заголовки, абзацы, списки, цитаты, блоки кода с языком,
     картинки, ссылки, жирный, курсив и `код`. Блок, который начинается
     с HTML-тега, передаётся как есть: так можно вставить таблицу или iframe.
+    Таблица передаётся целиком до закрывающего </table>, даже с пустыми
+    строками внутри. Спойлер <details> собирается с Markdown внутри.
     """
     lines = markdown.replace("\r\n", "\n").split("\n")
     blocks = []
@@ -297,6 +345,18 @@ def md_to_html(markdown):
             index += 1
             lang = f' class="language-{fence[2]}"' if fence[2] else ""
             blocks.append(f"<pre><code{lang}>{html.escape(chr(10).join(body), quote=False)}</code></pre>")
+            continue
+        block_tag = re.match(r"^<(table|details)\b[^>]*>", line)
+        if block_tag:
+            name = block_tag[1]
+            depth, start = 0, index
+            while index < len(lines):
+                depth += len(re.findall(rf"<{name}\b", lines[index])) - len(re.findall(rf"</{name}>", lines[index]))
+                index += 1
+                if depth <= 0:
+                    break
+            raw = "\n".join(lines[start:index])
+            blocks.append(_details(raw) if name == "details" else raw)
             continue
         heading = re.match(r"^(#{1,6}) +(.*)$", line)
         if heading:
@@ -336,6 +396,20 @@ def md_to_html(markdown):
         else:
             blocks.append(_paragraph(group))
     return "\n".join(blocks)
+
+
+def _details(raw):
+    """<details> из файла урока: <summary> — строчная разметка, остальное — Markdown."""
+    match = re.fullmatch(r"(<details\b[^>]*>)(.*)</details>\s*", raw, re.DOTALL)
+    if not match:
+        return raw
+    inner = match[2].strip("\n")
+    summary = ""
+    head = re.match(r"\s*<summary>(.*?)</summary>[ \t]*(?:\n|$)", inner, re.DOTALL)
+    if head:
+        summary = f"<summary>{_inline(head[1].strip())}</summary>"
+        inner = inner[head.end():]
+    return match[1] + summary + md_to_html(inner) + "</details>"
 
 
 def clean(source, raw=False, legacy=False):

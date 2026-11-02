@@ -28,8 +28,9 @@ import yaml
 from .client import StepikError
 from .render import code_fence, html_to_md, md_to_html
 
-# 2 — YAML-блоки и исправленные списки; 3 — исправленные цитаты (врезки).
-FORMAT = 3
+# 2 — YAML-блоки и исправленные списки; 3 — исправленные цитаты (врезки);
+# 4 — таблицы как HTML и спойлеры <details> с Markdown внутри.
+FORMAT = 4
 MISSING = object()
 
 YAML_FENCE = re.compile(r"^(`{3,})yaml stepik\s*$")
@@ -438,10 +439,10 @@ def load_yaml(text):
 # Тело шага
 # --------------------------------------------------------------------------
 
-def to_markdown(source, old_quotes=False):
-    """Тело шага для файла урока. old_quotes=True — как в файлах формата 2."""
+def to_markdown(source, fmt=FORMAT):
+    """Тело шага для файла урока формата fmt (2 и выше)."""
     block = source.get("block") or {}
-    condition = html_to_md(block.get("text"), old_quotes=old_quotes)
+    condition = html_to_md(block.get("text"), old_quotes=fmt < 3, old_blocks=fmt < 4)
     kind = block.get("name", "unknown")
     if kind == "text":
         return condition

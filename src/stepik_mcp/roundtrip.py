@@ -76,6 +76,6 @@ def check_course(client, course_id):
         "status": "ok" if report["failed"] == 0 else "mismatch", **report,
         "note": "Только чтение. passed — шаг собирается обратно без единого изменённого поля. "
                 "without_schema — типы, у которых в YAML весь source без удобных полей. "
-                "steps_losing_formatting_on_edit — шаги, у которых правка условия потеряет ссылки, таблицы "
+                "steps_losing_formatting_on_edit — шаги, у которых правка условия потеряет ссылки "
                 "или оформление.",
     }

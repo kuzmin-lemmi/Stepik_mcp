@@ -59,17 +59,24 @@ class _Features(HTMLParser):
     """Что из HTML шага пропадёт при публикации из Markdown."""
 
     KNOWN = {"p", "br", "strong", "b", "em", "i", "code", "pre", "img", "h1", "h2", "h3",
-             "h4", "h5", "h6", "ul", "ol", "li", "blockquote", "div", "span"}
+             "h4", "h5", "h6", "ul", "ol", "li", "blockquote", "div", "span", "details", "summary"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.found = set()
+        self.tables = 0  # таблица переходит в файл урока HTML-ом как есть
+
+    def handle_endtag(self, tag):
+        if tag == "table" and self.tables:
+            self.tables -= 1
 
     def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.tables += 1
+        if self.tables:
+            return
         if tag == "a":
             self.found.add("ссылки (в Markdown урока нет адресов ссылок)")
-        elif tag == "table":
-            self.found.add("таблицы")
         elif tag in ("iframe", "video", "audio", "script", "object", "embed"):
             self.found.add(f"встроенные элементы <{tag}>")
         elif tag not in self.KNOWN:
@@ -77,7 +84,7 @@ class _Features(HTMLParser):
         for name, _ in attrs:
             if (tag, name) in (("img", "src"), ("img", "alt"), ("a", "href")):
                 continue
-            if tag == "code" and name == "class":
+            if (tag == "code" and name == "class") or tag == "details":  # <details> копируется с атрибутами
                 continue
             self.found.add("атрибуты оформления (style, class, размеры картинок)")
 
@@ -122,7 +129,7 @@ def _edit_losses(source_html):
 
 def _old_render_differs(source_html, fmt):
     """Файл старого формата показывает этот шаг иначе, чем текущий загрузчик."""
-    old = html_to_md(source_html, legacy=fmt < 2, old_quotes=fmt < 3)
+    old = html_to_md(source_html, legacy=fmt < 2, old_quotes=fmt < 3, old_blocks=fmt < 4)
     return old != html_to_md(source_html)
 
 
@@ -204,7 +211,7 @@ def _changed_after(update_date, fetched_at):
 def expected_body(source, fmt):
     """Тело шага в файле, который скачан из этого исходника и не правился."""
     if fmt >= 2:
-        return steps.to_markdown(source, old_quotes=fmt < 3).strip()
+        return steps.to_markdown(source, fmt=fmt).strip()
     # Старые файлы: прежний рендер и прежний разбор списков.
     return render_step(source, raw=False, answers=True, legacy=True).partition("\n")[2].strip()
 
@@ -462,7 +469,7 @@ def plan_push(client, course_id, lesson_position):
             continue
         if fmt < steps.FORMAT and _old_render_differs(source["block"].get("text"), fmt):
             skipped.append({**where, "reason": "файл скачан старой версией, и вёрстка этого шага в нём искажена "
-                                               "(списки или врезки); скачайте урок заново и перенесите правку"})
+                                               "(списки, врезки, таблицы или спойлеры); скачайте урок заново и перенесите правку"})
             continue
         try:
             block = steps.build_block(source["block"], local_md)
