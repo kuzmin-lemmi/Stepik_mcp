@@ -88,6 +88,44 @@ def _lossy_features(source_html):
     return sorted(parser.found)
 
 
+# Теги, которые Markdown урока передаёт; остальные уже названы в _lossy_features.
+_STRUCTURE_TAGS = {"p", "br", "strong", "em", "code", "pre", "img", "h1", "h2", "h3", "h4", "h5", "h6",
+                   "ul", "ol", "li", "blockquote"}
+_SAME_TAG = {"b": "strong", "i": "em", "div": "p"}
+
+
+def _tag_sequence(source_html):
+    out = []
+    lists = 0
+    for slash, name in re.findall(r"<(/?)(\w+)", source_html or ""):
+        name = _SAME_TAG.get(name.lower(), name.lower())
+        if name in ("ul", "ol"):
+            lists += -1 if slash else 1
+        # <p> внутри пунктов списка ставит редактор Stepik; без него пункт выглядит так же.
+        if name in _STRUCTURE_TAGS and not (name == "p" and lists > 0):
+            out.append(slash + name)
+    return out
+
+
+def structure_changes(source_html):
+    """True, если HTML, собранный обратно из Markdown, вложен иначе, чем исходный."""
+    return _tag_sequence(md_to_html(html_to_md(source_html))) != _tag_sequence(source_html)
+
+
+def _edit_losses(source_html):
+    """Что потеряется при правке условия: элементы без Markdown и изменения вложенности блоков."""
+    found = _lossy_features(source_html)
+    if source_html and structure_changes(source_html):
+        found.append("структура блоков: после сборки из Markdown вложенность изменится")
+    return found
+
+
+def _old_render_differs(source_html, fmt):
+    """Файл старого формата показывает этот шаг иначе, чем текущий загрузчик."""
+    old = html_to_md(source_html, legacy=fmt < 2, old_quotes=fmt < 3)
+    return old != html_to_md(source_html)
+
+
 # --------------------------------------------------------------------------
 # Файл урока
 # --------------------------------------------------------------------------
@@ -166,7 +204,7 @@ def _changed_after(update_date, fetched_at):
 def expected_body(source, fmt):
     """Тело шага в файле, который скачан из этого исходника и не правился."""
     if fmt >= 2:
-        return steps.to_markdown(source).strip()
+        return steps.to_markdown(source, old_quotes=fmt < 3).strip()
     # Старые файлы: прежний рендер и прежний разбор списков.
     return render_step(source, raw=False, answers=True, legacy=True).partition("\n")[2].strip()
 
@@ -422,9 +460,9 @@ def plan_push(client, course_id, lesson_position):
             skipped.append({**where, "reason": "файл скачан до появления YAML-блоков; скачайте урок заново, "
                                                "чтобы править задание"})
             continue
-        if fmt < 2 and html_to_md(source["block"].get("text"), legacy=True) != html_to_md(source["block"].get("text")):
-            skipped.append({**where, "reason": "файл скачан старой версией, и списки этого шага в нём искажены; "
-                                               "скачайте урок заново и перенесите правку"})
+        if fmt < steps.FORMAT and _old_render_differs(source["block"].get("text"), fmt):
+            skipped.append({**where, "reason": "файл скачан старой версией, и вёрстка этого шага в нём искажена "
+                                               "(списки или врезки); скачайте урок заново и перенесите правку"})
             continue
         try:
             block = steps.build_block(source["block"], local_md)
@@ -439,7 +477,7 @@ def plan_push(client, course_id, lesson_position):
         confirm = kind != "text" and learners > 0 and any(not path.startswith("text") for path in fields)
         operations.append({"op": "update", "step_id": sid, "kind": kind, "markdown": entry["body"],
                            "images": image_shas, "confirm": confirm})
-        warnings = _lossy_features(source["block"].get("text")) if "text" in fields else []
+        warnings = _edit_losses(source["block"].get("text")) if "text" in fields else []
         summary.append({"step": f"step_id {sid}, позиция {position_of[sid]}", "status": "MODIFIED", "type": kind,
                         **({"поля": fields} if kind != "text" else {}),
                         **({"будет потеряно": warnings} if warnings else {}),

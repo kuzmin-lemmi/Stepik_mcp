@@ -160,7 +160,7 @@ class PublishTests(unittest.TestCase):
     def test_download_saves_step_sources_without_statistics(self):
         saved = json.loads((self.folder / ".stepik" / "steps" / "11.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["block"], {"name": "text", "text": "<p>Theory</p>"})
-        self.assertIn("format: 2", self.lesson.read_text(encoding="utf-8"))
+        self.assertIn("format: 3", self.lesson.read_text(encoding="utf-8"))
 
     def test_statistics_are_not_saved(self):
         self.data["step-sources"].append({"id": 31, "lesson": 1000, "viewed_by": 5, "passed_by": 2,
@@ -283,7 +283,7 @@ class PublishTests(unittest.TestCase):
                 publish.plan_rollback(self.client, 1, "1.1", name)
 
     def test_old_format_task_edit_asks_for_fresh_download(self):
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 2\n", "")
+        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "")
         self.lesson.write_text(text.replace("Question", "Changed"), encoding="utf-8", newline="\n")
         result = publish.plan_push(self.client, 1, "1.1")
         self.assertIn("до появления YAML", next(item for item in result["skipped"] if item.get("step_id") == 12)["reason"])
@@ -292,7 +292,7 @@ class PublishTests(unittest.TestCase):
         self.remote(11)["block"]["text"] = "<ul><li><p>a</p></li></ul>"
         self.remote(11)["update_date"] = "2000-01-01T00:00:00Z"
         (self.folder / ".stepik" / "steps" / "11.json").unlink()
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 2\n", "")
+        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "")
         self.lesson.write_text(text.replace("\nTheory\n", "\n- \n\na\n"), encoding="utf-8", newline="\n")
         self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
         self.edit("\na\n", "\nb\n")
@@ -300,7 +300,7 @@ class PublishTests(unittest.TestCase):
         self.assertIn("старой версией", result["skipped"][0]["reason"])
 
     def test_old_file_with_unclosed_fence_keeps_all_steps(self):
-        text = self.lesson.read_text(encoding="utf-8").replace("format: 2\n", "")
+        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "")
         self.lesson.write_text(text.replace("\nTheory\n", "\nTheory\n\n```\n"), encoding="utf-8", newline="\n")
         self.assertEqual([entry["step_id"] for entry in publish.parse_lesson(self.lesson.read_text(encoding="utf-8"))],
                          [11, 12, 13])
@@ -373,6 +373,25 @@ class PublishTests(unittest.TestCase):
         created = self.client.post.call_args.args[1]["stepSource"]
         self.assertEqual((created["position"], created["cost"], created["block"]["name"]), (2, 1, "string"))
         self.assertIn("скачайте урок заново", result["note"])
+
+    def test_format_2_file_with_quotes(self):
+        # Файлы формата 2 показывали врезку пустой цитатой с текстом под ней.
+        self.remote(11)["block"]["text"] = "<blockquote><p>Итог</p></blockquote>"
+        self.remote(11)["update_date"] = "2000-01-01T00:00:00Z"
+        (self.folder / ".stepik" / "steps" / "11.json").unlink()
+        text = self.lesson.read_text(encoding="utf-8").replace("format: 3\n", "format: 2\n")
+        self.lesson.write_text(text.replace("\nTheory\n", "\n> \n\nИтог\n"), encoding="utf-8", newline="\n")
+        self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
+        self.edit("\nИтог\n", "\nИтог 2\n")
+        result = publish.plan_push(self.client, 1, "1.1")
+        self.assertIn("врезки", result["skipped"][0]["reason"])
+        self.assert_no_writes()
+
+    def test_structure_change_is_reported(self):
+        html = "<ul><li><blockquote><p>x</p></blockquote></li></ul>"
+        self.assertTrue(publish.structure_changes(html))
+        self.assertFalse(publish.structure_changes("<ul><li><p>a</p></li></ul><blockquote><p>b</p></blockquote>"))
+        self.assertIn("структура блоков", publish._edit_losses(html)[-1])
 
     def test_empty_allowlist_by_default(self):
         with patch.dict(os.environ, {"ALLOWED_WRITE_COURSES": ""}):

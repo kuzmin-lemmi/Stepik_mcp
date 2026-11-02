@@ -45,6 +45,29 @@ class ListParagraphTests(unittest.TestCase):
         self.assertEqual(markdown, "\\`\\`\\`html")
         self.assertEqual(md_to_html(markdown), "<p>```html</p>")
 
+    def test_blockquote_keeps_its_content(self):
+        # Врезки уроков: текст выпадал из цитаты, а цитата оставалась пустой.
+        source = "<blockquote><p><strong>🔑 Итог:</strong><br>\nвторая строка</p></blockquote>"
+        markdown = html_to_md(source)
+        self.assertEqual(markdown, "> **🔑 Итог:**  \n> вторая строка")
+        self.assertEqual(md_to_html(markdown), "<blockquote><p><strong>🔑 Итог:</strong><br>\nвторая строка</p></blockquote>")
+
+    def test_blockquote_with_two_paragraphs_and_list(self):
+        source = "<blockquote><p>a</p><ul><li>b</li></ul><p>c</p></blockquote>"
+        self.assertEqual(html_to_md(source), "> a\n>\n> - b\n>\n> c")
+        self.assertEqual(md_to_html(html_to_md(source)), "<blockquote><p>a</p>\n<ul><li>b</li></ul>\n<p>c</p></blockquote>")
+
+    def test_old_quote_mode_reproduces_format_2(self):
+        self.assertEqual(html_to_md("<blockquote><p>x</p></blockquote>", old_quotes=True), "> \n\nx")
+
+    def test_literal_asterisks_stay_text(self):
+        markdown = html_to_md("<p>2**3 и a*b*c</p>")
+        self.assertEqual(md_to_html(markdown), "<p>2**3 и a*b*c</p>")
+
+    def test_bold_code_keeps_bold(self):
+        source = "<p><strong><code>await</code></strong> и <em>курсив <code>x</code></em></p>"
+        self.assertEqual(md_to_html(html_to_md(source)), source)
+
     def test_paragraphs_outside_lists_unchanged(self):
         self.assertEqual(html_to_md("<p>a</p><p>b</p>"), "a\n\nb")
 

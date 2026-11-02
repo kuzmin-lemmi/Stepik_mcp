@@ -19,10 +19,13 @@ class _Md(HTMLParser):
     BLOCK = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
              "ul", "ol", "li", "pre", "blockquote", "table", "tr"}
 
-    def __init__(self, legacy=False):
+    def __init__(self, legacy=False, old_quotes=False):
         super().__init__(convert_charrefs=True)
-        # legacy=True повторяет вывод до исправления списков: так скачаны старые файлы.
+        # legacy=True повторяет вывод до исправления списков (формат 1), old_quotes —
+        # до исправления цитат (формат 2): так скачаны старые файлы уроков.
         self.legacy = legacy
+        self.old_quotes = legacy or old_quotes
+        self.quote_starts = []    # индексы self.parts, где начались открытые цитаты
         self.item_fresh = False   # только что выведен маркер пункта списка
         self.parts = []
         self.list_stack = []      # 'ul' | 'ol'
@@ -95,7 +98,10 @@ class _Md(HTMLParser):
             self.item_fresh = True
         elif tag == "blockquote":
             self._newline(2)
-            self._emit("> ")
+            if self.old_quotes:
+                self._emit("> ")
+            else:
+                self.quote_starts.append(len(self.parts))
         elif tag in ("p", "div") and self.list_stack and not self.legacy:
             # Редактор Stepik оборачивает текст пункта в <p>: первый абзац идёт
             # сразу за маркером, следующие продолжают тот же пункт.
@@ -143,6 +149,13 @@ class _Md(HTMLParser):
             self._newline(1)
         elif tag in ("p", "div") and self.list_stack and not self.legacy:
             pass
+        elif tag == "blockquote" and self.quote_starts:
+            # Всё содержимое цитаты — строки с «> », пустые строки внутри — «>».
+            start = self.quote_starts.pop()
+            inner = re.sub(r"\n{3,}", "\n\n", "".join(self.parts[start:])).strip("\n")
+            del self.parts[start:]
+            self._emit("\n".join(f"> {line}" if line.strip() else ">" for line in inner.split("\n")))
+            self._newline(2)
         elif tag in self.BLOCK:
             self._newline(2)
 
@@ -164,6 +177,9 @@ class _Md(HTMLParser):
             if not self.legacy and not self.in_code:
                 # Буквальные ` в тексте не должны открывать код в Markdown.
                 text = text.replace("`", "\\`")
+            if not self.old_quotes and self.parts and self.parts[-1].endswith("\n"):
+                # Строка после <br> или в начале блока не начинается с пробела.
+                text = text.lstrip(" ")
             if text.strip() or (self.parts and not self.parts[-1].endswith(("\n", " "))):
                 self._emit(text)
 
@@ -179,10 +195,10 @@ def code_fence(text):
     return "`" * max(3, longest + 1)
 
 
-def html_to_md(source, legacy=False):
+def html_to_md(source, legacy=False, old_quotes=False):
     if not source:
         return ""
-    parser = _Md(legacy=legacy)
+    parser = _Md(legacy=legacy, old_quotes=old_quotes)
     parser.feed(source)
     parser.close()
     return parser.result()
@@ -194,26 +210,24 @@ def html_to_md(source, legacy=False):
 
 def _inline(text):
     """Строчная разметка: `код`, картинки, ссылки, **жирный**, *курсив*."""
-    out = []
+    codes = []
     # \` — буквальная обратная кавычка, а не начало кода.
     text = text.replace("\\`", "\x00")
-    for index, chunk in enumerate(re.split(r"`([^`]+)`", text)):
-        if index % 2:
-            out.append(f"<code>{html.escape(chunk, quote=False)}</code>")
-            continue
-        chunk = html.escape(chunk, quote=False)
-        chunk = re.sub(
-            r"!\[([^\]]*)\]\(([^)\s]+)\)",
-            lambda m: f'<img alt="{html.escape(m[1])}" src="{html.escape(m[2])}">', chunk,
-        )
-        chunk = re.sub(
-            r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)",
-            lambda m: f'<a href="{html.escape(m[2])}">{m[1]}</a>', chunk,
-        )
-        chunk = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", chunk)
-        chunk = re.sub(r"(?<![*\w])\*(?=\S)(.+?)(?<=\S)\*(?![*\w])", r"<em>\1</em>", chunk)
-        out.append(chunk)
-    return "".join(out).replace("\x00", "`")
+    # Код заменяется метками, чтобы **жирный** и *курсив* находили пару через `код`.
+    text = re.sub(r"`([^`]+)`", lambda m: codes.append(m[1]) or f"\x01{len(codes) - 1}\x02", text)
+    text = html.escape(text, quote=False)
+    text = re.sub(
+        r"!\[([^\]]*)\]\(([^)\s]+)\)",
+        lambda m: f'<img alt="{html.escape(m[1])}" src="{html.escape(m[2])}">', text,
+    )
+    text = re.sub(
+        r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)",
+        lambda m: f'<a href="{html.escape(m[2])}">{m[1]}</a>', text,
+    )
+    text = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<![*\w])\*(?=\S)(.+?)(?<=\S)\*(?![*\w])", r"<em>\1</em>", text)
+    text = re.sub(r"\x01(\d+)\x02", lambda m: f"<code>{html.escape(codes[int(m[1])], quote=False)}</code>", text)
+    return text.replace("\x00", "`")
 
 
 def _paragraph(lines):
@@ -292,15 +306,19 @@ def md_to_html(markdown):
             continue
         group = []
         if line.startswith(">"):
-            # Строка без «>» сразу после текста цитаты продолжает её (так загрузчик пишет перенос <br>).
+            # Содержимое цитаты — обычный Markdown: абзацы, переносы, списки, код.
+            # Строка без «>» сразу после текста цитаты продолжает её (так файлы
+            # формата 2 записывали перенос <br>).
             while index < len(lines) and (lines[index].startswith(">") or (
                     group and group[-1].strip() and lines[index].strip()
                     and not lines[index].startswith(("```", "#")) and not LIST_ITEM.match(lines[index]))):
                 current = lines[index]
-                group.append((current[1:] if current.startswith(">") else current).lstrip())
+                if current.startswith(">"):
+                    current = current[1:]
+                    current = current[1:] if current.startswith(" ") else current
+                group.append(current)
                 index += 1
-            inner = [item for item in group if item.strip()]
-            blocks.append("<blockquote>" + (_paragraph(inner) if inner else "") + "</blockquote>")
+            blocks.append("<blockquote>" + md_to_html("\n".join(group)) + "</blockquote>")
             continue
         if LIST_ITEM.match(line):
             while index < len(lines) and lines[index].strip() and not lines[index].startswith("```"):

@@ -8,7 +8,7 @@
 from collections import Counter
 
 from . import steps
-from .publish import _fence_after, _lossy_features, parse_lesson
+from .publish import _edit_losses, _fence_after, parse_lesson, structure_changes
 
 MAX_FAILURES = 20
 
@@ -17,6 +17,7 @@ def check_sources(sources):
     totals, passed = Counter(), Counter()
     failures = []
     lossy = 0
+    restructured = 0
     hidden_templates = 0
     for source in sources:
         block = source.get("block") or {}
@@ -43,8 +44,10 @@ def check_sources(sources):
                                  "fields": diff[:5]})
         else:
             passed[kind] += 1
-        if _lossy_features(block.get("text")):
+        if _edit_losses(block.get("text")):
             lossy += 1
+        if block.get("text") and structure_changes(block.get("text")):
+            restructured += 1
         if kind == "code" and "templates" not in steps.settings(block):
             hidden_templates += 1
     failed = sum(totals.values()) - sum(passed.values())
@@ -54,6 +57,7 @@ def check_sources(sources):
         "without_schema": sorted(kind for kind in totals if kind != "text" and not steps.has_schema(kind)),
         "failures": failures,
         "steps_losing_formatting_on_edit": lossy,
+        "steps_changing_structure_on_edit": restructured,
         "code_steps_with_raw_templates": hidden_templates,
     }
 
