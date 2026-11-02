@@ -33,6 +33,14 @@ class MarkdownToHtmlTests(unittest.TestCase):
                     "```python\nprint(1)\n```\n\n![подпись](https://stepik.org/media/a.png)")
         self.assertEqual(html_to_md(md_to_html(markdown)), markdown)
 
+    def test_blockquote_with_line_break_survives_round_trip(self):
+        # Загрузчик пишет строку после <br> без «>»: она продолжает цитату, а не начинает абзац.
+        markdown = html_to_md("<blockquote><strong>🔑 Итог:</strong><br />\nтекст цитаты</blockquote><p>после</p>")
+        self.assertEqual(md_to_html(markdown),
+                         "<blockquote><p><strong>🔑 Итог:</strong><br>\nтекст цитаты</p></blockquote>\n<p>после</p>")
+        self.assertEqual(md_to_html("> **A:**  \n> b\n\nc"),
+                         "<blockquote><p><strong>A:</strong><br>\nb</p></blockquote>\n<p>c</p>")
+
     def test_html_block_passes_through(self):
         self.assertEqual(md_to_html("<table><tr><td>1</td></tr></table>"),
                          "<table><tr><td>1</td></tr></table>")
@@ -71,6 +79,9 @@ class PublishTests(unittest.TestCase):
         self.client.put = Mock(side_effect=self.put)
         self.client.delete = Mock(side_effect=self.delete)
         self.client.upload = Mock(return_value={"attachments": [{"id": 5, "file": "/media/attachments/lesson/1000/s.png"}]})
+        # Настоящий Stepik при вставке в середину урока не сдвигает следующие шаги:
+        # у нового и старого шага оказывается одна позиция, и новый встаёт после старого.
+        self.shift_on_insert = True
         sw.cache_lesson(self.client, 1, "1.1")
         self.folder = self.root / "course-1"
         self.lesson = next(self.folder.glob("*/01.01-lesson-1000.md"))
@@ -86,13 +97,27 @@ class PublishTests(unittest.TestCase):
 
     def post(self, endpoint, payload):
         self.assertEqual(endpoint, "step-sources")
-        created = {"id": 99, **payload["stepSource"]}
+        new_id = max([98] + [row["id"] for row in self.data["step-sources"]]) + 1
+        created = {"id": new_id, **payload["stepSource"]}
+        order = self.data["lessons"][0]["steps"]
+        if self.shift_on_insert:
+            for row in self.data["step-sources"]:
+                if row.get("position", 0) >= created["position"]:
+                    row["position"] += 1
+            order.insert(created["position"] - 1, new_id)
+        else:
+            after = [index for index, sid in enumerate(order) if self.remote(sid).get("position", 0) <= created["position"]]
+            order.insert(after[-1] + 1 if after else 0, new_id)
         self.data["step-sources"].append(created)
-        self.data["lessons"][0]["steps"].insert(created["position"] - 1, 99)
         return {"step-sources": [created]}
 
     def put(self, endpoint, payload):
-        self.remote(int(endpoint.rsplit("/", 1)[1]))["block"] = payload["stepSource"]["block"]
+        row = self.remote(int(endpoint.rsplit("/", 1)[1]))
+        row["block"] = payload["stepSource"]["block"]
+        if payload["stepSource"].get("position") not in (None, row.get("position")):
+            row["position"] = payload["stepSource"]["position"]
+            order = self.data["lessons"][0]["steps"]
+            order.sort(key=lambda sid: self.remote(sid).get("position", 0))
         return {"step-sources": [payload["stepSource"]]}
 
     def delete(self, endpoint):
@@ -452,14 +477,37 @@ class PublishTests(unittest.TestCase):
         with self.assertRaises(StepikError):
             publish.plan_push(self.client, 1, "1.1")
 
-    def test_missing_step_and_reordering_are_refused(self):
+    def test_missing_step_is_refused(self):
         text = self.lesson.read_text(encoding="utf-8")
         self.lesson.write_text(text.replace("step_id: 11 -->", "step_id: 77 -->"), encoding="utf-8")
         with self.assertRaisesRegex(StepikError, "Перенос шагов не поддерживается"):
             publish.plan_push(self.client, 1, "1.1")
-        self.data["lessons"][0]["steps"] = [77, 12, 13]
-        self.data["step-sources"].append({"id": 77, "lesson": 1000, "block": {"name": "text", "text": ""}})
-        self.data["lessons"][0]["steps"] = [12, 77, 13]
+
+    def test_new_step_in_the_middle_keeps_file_order(self):
+        self.shift_on_insert = False
+        self.edit("<!-- step_id: 12 -->", "<!-- new_step -->\nNew\n\n<!-- step_id: 12 -->")
+        plan = publish.plan_push(self.client, 1, "1.1")
+        result = publish.apply_push(self.client, 1, plan["plan_id"])
+        self.assertEqual(self.data["lessons"][0]["steps"], [11, 99, 12, 13])
+        self.assertEqual([self.remote(sid)["position"] for sid in [11, 99, 12, 13]], [1, 2, 3, 4])
+        self.assertEqual([op["step_id"] for op in result["done"] if op["op"] == "move"], [12, 13])
+        log = (self.folder / "logs" / "stepik-write.log").read_text(encoding="utf-8")
+        self.assertEqual(log.count('"move"'), 2)
+
+    def test_reorder_only_plan_fixes_order_on_stepik(self):
+        self.shift_on_insert = False
+        self.data["lessons"][0]["steps"] = [12, 11, 13]
+        self.remote(11)["position"], self.remote(12)["position"] = 2, 1
+        plan = publish.plan_push(self.client, 1, "1.1")
+        self.assertEqual(plan["changes"], [{"step": "порядок шагов", "status": "MOVED", "порядок": [11, 12, 13]}])
+        self.assert_no_writes()
+        publish.apply_push(self.client, 1, plan["plan_id"])
+        self.assertEqual(self.data["lessons"][0]["steps"], [11, 12, 13])
+        self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
+
+    def test_reorder_with_new_steps_is_refused(self):
+        self.data["lessons"][0]["steps"] = [12, 11, 13]
+        self.edit("<!-- step_id: 13 -->", "<!-- new_step -->\nNew\n\n<!-- step_id: 13 -->")
         with self.assertRaisesRegex(StepikError, "Порядок шагов"):
             publish.plan_push(self.client, 1, "1.1")
 

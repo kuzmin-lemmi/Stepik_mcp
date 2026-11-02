@@ -17,6 +17,10 @@ free-answer и code: правка YAML накладывается на исхо�
 Неизменённые шаги на Stepik не отправляются, поэтому конвертация HTML -> Markdown
 с потерями их не портит.
 
+Stepik не сдвигает следующие шаги, когда шаг создаётся в середине урока, поэтому
+после записи apply_push сверяет порядок шагов с файлом и выставляет позиции сам.
+План, который только переставляет шаги, тоже проходит через plan/apply.
+
 Удаление шага — метка <!-- delete_step: N --> вместо <!-- step_id: N -->. Применение
 требует перечислить удаляемые шаги в confirm_delete; урок до удаления остаётся в снимке.
 
@@ -331,6 +335,7 @@ def plan_push(client, course_id, lesson_position):
     operations, summary, skipped, diff_parts, images = [], [], [], [], {}
     last_anchor = 0
     created = 0
+    reordered = False
     for entry in entries:
         sid = entry["step_id"]
         step_images = [(src, rel) for src, rel in _local_images(folder, lesson_path, entry["body"])]
@@ -368,9 +373,8 @@ def plan_push(client, course_id, lesson_position):
             raise StepikError(f"Шага {sid} нет в уроке {lesson_id} на Stepik. Перенос шагов не поддерживается; "
                               "чтобы удалить шаг, замените его метку на <!-- delete_step: N -->", status=409)
         if position_of[sid] <= last_anchor:
-            raise StepikError("Порядок шагов в файле отличается от Stepik. Перемещение шагов не поддерживается",
-                              status=409)
-        last_anchor = position_of[sid]
+            reordered = True
+        last_anchor = max(last_anchor, position_of[sid])
         if entry["delete"]:
             source = sources[sid]
             kind = source["block"].get("name")
@@ -451,6 +455,17 @@ def plan_push(client, course_id, lesson_position):
                                     lineterm="")
         diff_parts.append("\n".join(diff) + "\n")
 
+    if reordered:
+        if any(op["op"] in ("create", "delete") for op in operations):
+            raise StepikError("Порядок шагов в файле отличается от Stepik. Сначала опубликуйте перестановку "
+                              "отдельно, без новых и удаляемых шагов", status=409)
+        order = [entry["step_id"] for entry in entries if entry["step_id"] and not entry["delete"]]
+        operations.append({"op": "reorder", "order": order})
+        summary.append({"step": "порядок шагов", "status": "MOVED", "порядок": order})
+        diff_parts.append("=== Порядок шагов ===\n"
+                          + "\n".join(f"- шаг {position_of[sid]} (step_id {sid})" for sid in step_ids) + "\n"
+                          + "\n".join(f"+ шаг {number} (step_id {sid})" for number, sid in enumerate(order, 1))
+                          + "\n")
     if not operations:
         return {"status": "nothing_to_push", "lesson_id": lesson_id, "skipped": skipped,
                 "note": "Шаги совпадают со Stepik. Ничего не отправлено."}
@@ -616,6 +631,37 @@ def _record_new_ids(folder, lesson_path, created_ids):
     _atomic_write(lesson_path, "\n".join(lines), replace=True)
 
 
+def _fix_order(client, folder, course_id, lesson_id, lesson_path):
+    """Выставляет на Stepik позиции шагов по порядку файла. Возвращает операции move.
+
+    Stepik не сдвигает соседей, когда шаг создаётся в середине урока или ему меняют
+    позицию, поэтому позиции проверяются заново, пока не совпадут с файлом.
+    """
+    desired = [entry["step_id"] for entry in parse_lesson(lesson_path.read_text(encoding="utf-8"))
+               if entry["step_id"] and not entry["delete"]]
+    moves = []
+    for _ in range(3):
+        step_ids, sources = _remote_state(client, lesson_id)
+        if set(step_ids) != set(desired):
+            raise StepikError("Шаги урока на Stepik не совпадают с файлом: порядок не исправлен")
+        positions = [sources[sid].get("position") for sid in desired]
+        if step_ids == desired and len(set(positions)) == len(positions):
+            return moves
+        for number, sid in enumerate(desired, 1):
+            if sources[sid].get("position") == number:
+                continue
+            source = dict(sources[sid])
+            source["position"] = number
+            client.put(f"step-sources/{sid}", {"stepSource": source})
+            _log(folder, course_id=course_id, lesson_id=lesson_id, step_id=sid, operation="move",
+                 old_position=sources[sid].get("position"), new_position=number, result="ok")
+            moves.append({"op": "move", "step_id": sid, "position": number})
+    step_ids, _ = _remote_state(client, lesson_id)
+    if step_ids != desired:
+        raise StepikError("Порядок шагов на Stepik не совпал с файлом после перестановки")
+    return moves
+
+
 def _refresh_bases(client, folder, done):
     """Опубликованная версия шагов становится новой базой для следующих правок."""
     touched = [operation["step_id"] for operation in done
@@ -715,6 +761,8 @@ def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=No
             ordered = ([op for op in plan["operations"] if op["op"] != "delete"]
                        + [op for op in plan["operations"] if op["op"] == "delete"])
             for operation in ordered:
+                if operation["op"] == "reorder":
+                    continue  # порядок выставляется после записи шагов
                 markdown = _with_urls(operation.get("markdown", ""), operation.get("images", []), uploaded)
                 if operation["op"] == "delete":
                     sid = operation["step_id"]
@@ -763,6 +811,15 @@ def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=No
                 _log(folder, course_id=course_id, lesson_id=lesson_id, step_id=sid, operation=operation["op"],
                      old_hash=old_hash, new_hash=new_hash, result="ok")
                 done.append(current)
+            if created_ids:
+                _record_new_ids(folder, lesson_path, created_ids)
+                created_ids = []
+            if deleted_ids:
+                _remove_deleted_steps(folder, lesson_path, deleted_ids)
+                deleted_ids = []
+            if plan.get("kind", "push") == "push":  # у отката порядок задаёт снимок, а не файл
+                current = {"op": "move"}
+                done.extend(_fix_order(client, folder, course_id, lesson_id, lesson_path))
         except StepikError as exc:
             _log(folder, course_id=course_id, lesson_id=lesson_id, operation=current and current["op"],
                  result="error", error=str(exc))

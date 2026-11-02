@@ -292,10 +292,14 @@ def md_to_html(markdown):
             continue
         group = []
         if line.startswith(">"):
-            while index < len(lines) and lines[index].startswith(">"):
-                group.append(lines[index][1:].strip())
+            # Строка без «>» сразу после текста цитаты продолжает её (так загрузчик пишет перенос <br>).
+            while index < len(lines) and (lines[index].startswith(">") or (
+                    group and group[-1].strip() and lines[index].strip()
+                    and not lines[index].startswith(("```", "#")) and not LIST_ITEM.match(lines[index]))):
+                current = lines[index]
+                group.append((current[1:] if current.startswith(">") else current).lstrip())
                 index += 1
-            inner = [item for item in group if item]
+            inner = [item for item in group if item.strip()]
             blocks.append("<blockquote>" + (_paragraph(inner) if inner else "") + "</blockquote>")
             continue
         if LIST_ITEM.match(line):
