@@ -505,10 +505,14 @@ class PublishTests(unittest.TestCase):
         result = publish.plan_push(self.client, 1, "1.1")
         self.assertEqual(result["skipped"][0]["reason"], "шаги типа table пока не публикуются")
 
-    def test_lossy_html_is_reported(self):
+    def test_link_is_kept_and_extra_attributes_reported(self):
+        # С формата 5 адрес ссылки хранится в Markdown: правка шага его не теряет.
+        self.assertIn("See [docs](https://x)", self.lesson.read_text(encoding="utf-8"))
         self.edit("See [docs]", "See the [docs]")
         result = publish.plan_push(self.client, 1, "1.1")
-        self.assertEqual(result["changes"][0]["будет потеряно"], ["ссылки (в Markdown урока нет адресов ссылок)"])
+        self.assertNotIn("будет потеряно", result["changes"][0])
+        self.assertIn("+See the [docs](https://x)", Path(result["diff_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(publish._lossy_features('<a href="x" rel="nofollow">a</a>'), ["атрибуты оформления (a rel)"])
 
     def test_image_outside_course_folder_is_refused(self):
         self.edit("Theory\n", "Theory\n\n![x](../../secret.png)\n")

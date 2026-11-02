@@ -12,6 +12,15 @@ from .client import BASE_URL, StepikError
 # HTML -> markdown
 # --------------------------------------------------------------------------
 
+# Версия записи урока в Markdown. 2 — исправленные списки; 3 — цитаты целиком;
+# 4 — таблицы HTML-ом и спойлеры <details>; 5 — стили блоков кода, абзацев и
+# заголовков, размеры картинок, адреса ссылок, пробелы у **жирного**.
+LATEST_FORMAT = 5
+
+# Блоки со style= переходят в файл урока HTML-ом: в Markdown у них нет записи.
+STYLED_BLOCKS = {"p", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
 class _Md(HTMLParser):
     """Компактный конвертер того подмножества HTML, что реально встречается
     в шагах Stepik. Всё незнакомое разворачивается в свой текст."""
@@ -19,16 +28,18 @@ class _Md(HTMLParser):
     BLOCK = {"p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
              "ul", "ol", "li", "pre", "blockquote", "table", "tr"}
 
-    def __init__(self, legacy=False, old_quotes=False, old_blocks=False):
+    def __init__(self, fmt=LATEST_FORMAT):
         super().__init__(convert_charrefs=True)
-        # legacy=True повторяет вывод до исправления списков (формат 1), old_quotes —
-        # до исправления цитат (формат 2), old_blocks — до таблиц и спойлеров
-        # (формат 3): так скачаны старые файлы уроков.
-        self.legacy = legacy
-        self.old_quotes = legacy or old_quotes
-        self.old_blocks = self.old_quotes or old_blocks
-        self.table_depth = 0      # >0 — внутри таблицы, её HTML копируется как есть
-        self.table_html = []
+        # Старые форматы повторяют прежний вывод: так скачаны старые файлы уроков.
+        self.legacy = fmt < 2
+        self.old_quotes = fmt < 3
+        self.old_blocks = fmt < 4
+        self.old_inline = fmt < 5
+        self.raw_tag = None       # таблица или блок со стилем: HTML копируется как есть
+        self.raw_depth = 0
+        self.raw_html = []
+        self.links = []           # href открытых <a>
+        self.pre_style = ""
         self.quote_starts = []    # индексы self.parts, где начались открытые цитаты
         self.item_fresh = False   # только что выведен маркер пункта списка
         self.parts = []
@@ -38,6 +49,7 @@ class _Md(HTMLParser):
         self.pre_lang = ""
         self.pre_text = []
         self.in_code = False
+        self.mark_fresh = False   # только что открыт ** или *
 
     # -- вывод -------------------------------------------------------------
 
@@ -57,15 +69,16 @@ class _Md(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
-        if self.table_depth:
-            self.table_depth += tag == "table"
-            self.table_html.append(self.get_starttag_text())
+        if self.raw_depth:
+            self.raw_depth += tag == self.raw_tag
+            self.raw_html.append(self.get_starttag_text())
             return
-        if tag == "table" and not self.old_blocks and not self.in_pre:
-            # У таблицы нет записи в Markdown без потерь: в файле урока её HTML.
+        styled = (tag in STYLED_BLOCKS and attrs.get("style") and not self.old_inline and not self.list_stack)
+        if (tag == "table" and not self.old_blocks or styled) and not self.in_pre:
+            # У таблицы и блока со стилем нет записи в Markdown без потерь: в файле урока их HTML.
             self._newline(2)
-            self.table_depth = 1
-            self.table_html = [self.get_starttag_text()]
+            self.raw_tag, self.raw_depth = tag, 1
+            self.raw_html = [self.get_starttag_text()]
             return
         if tag in ("details", "summary") and not self.old_blocks and not self.in_pre:
             # Спойлер: <details> и <summary> на своих строках, внутри — обычный Markdown.
@@ -83,25 +96,32 @@ class _Md(HTMLParser):
                 self.pre_text.append("\n")
             return
         if tag == "br":
-            self._emit("  \n")
-        elif tag in ("strong", "b"):
-            self._emit("**")
-        elif tag in ("em", "i"):
-            self._emit("*")
+            if not self.old_inline and self.parts and self.parts[-1] in ("  \n", "<br>\n"):
+                # Второй перенос подряд в Markdown стал бы разрывом абзаца: пишем его тегом.
+                self._emit("<br>\n")
+            else:
+                self._emit("  \n")
+        elif tag in ("strong", "b", "em", "i"):
+            self._emit("**" if tag in ("strong", "b") else "*")
+            self.mark_fresh = True
         elif tag == "code" and not self.in_pre:
             self._emit("`")
             self.in_code = True
         elif tag == "pre":
             self.in_pre = True
             self.pre_lang = ""
+            self.pre_style = "" if self.old_inline else attrs.get("style") or ""
             self.pre_text = []
             self._newline(2)
         elif tag == "a":
+            self.links.append(attrs.get("href") or "")
             self._emit("[")
         elif tag == "img":
             src = attrs.get("src", "")
             alt = attrs.get("alt", "изображение")
-            self._emit(f"![{alt}]({src})")
+            extra = "" if self.old_inline else _attributes(
+                {name: value for name, value in attrs.items() if name not in ("src", "alt")})
+            self._emit(f"![{alt}]({src}){extra}")
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             self._newline(2)
             self._emit("#" * int(tag[1]) + " ")
@@ -142,12 +162,15 @@ class _Md(HTMLParser):
                 self.pre_lang = match.group(1)
 
     def handle_endtag(self, tag):
-        if self.table_depth:
-            self.table_html.append(f"</{tag}>")
-            if tag == "table":
-                self.table_depth -= 1
-                if not self.table_depth:
-                    self._emit("".join(self.table_html).strip())
+        if self.raw_depth:
+            self.raw_html.append(f"</{tag}>")
+            if tag == self.raw_tag:
+                self.raw_depth -= 1
+                if not self.raw_depth:
+                    raw = "".join(self.raw_html).strip()
+                    if self.raw_tag != "table":
+                        raw = re.sub(r"\s*\n\s*", " ", raw)  # абзац — одна строка файла
+                    self._emit(raw)
                     self._newline(2)
             return
         if tag in ("details", "summary") and not self.old_blocks and not self.in_pre:
@@ -160,10 +183,14 @@ class _Md(HTMLParser):
             return
         if self.in_pre and not self.legacy and tag not in ("pre", "code"):
             return
-        if tag in ("strong", "b"):
-            self._emit("**")
-        elif tag in ("em", "i"):
-            self._emit("*")
+        if tag in ("strong", "b", "em", "i"):
+            mark = "**" if tag in ("strong", "b") else "*"
+            if not self.old_inline and self.parts and self.parts[-1].endswith(" "):
+                # «**Вопрос: **» в Markdown не жирный: пробел выносится за звёздочки.
+                self.parts[-1] = self.parts[-1].rstrip(" ")
+                self._emit(mark + " ")
+            else:
+                self._emit(mark)
         elif tag == "code" and not self.in_pre:
             self._emit("`")
             self.in_code = False
@@ -177,9 +204,11 @@ class _Md(HTMLParser):
                 # любых ``` внутри кода.
                 code = "".join(self.pre_text).rstrip("\n")
                 fence = code_fence(code)
-                self._emit(f"{fence}{self.pre_lang}\n{code}\n{fence}\n")
+                style = f' {{style="{self.pre_style}"}}' if self.pre_style else ""
+                self._emit(f"{fence}{self.pre_lang}{style}\n{code}\n{fence}\n")
         elif tag == "a":
-            self._emit("]")
+            href = self.links.pop() if self.links else ""
+            self._emit(f"]({href})" if href and not self.old_inline else "]")
         elif tag in ("ul", "ol"):
             if self.list_stack:
                 self.list_stack.pop()
@@ -203,12 +232,12 @@ class _Md(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_comment(self, data):
-        if self.table_depth:
-            self.table_html.append(f"<!--{data}-->")
+        if self.raw_depth:
+            self.raw_html.append(f"<!--{data}-->")
 
     def handle_data(self, data):
-        if self.table_depth:
-            self.table_html.append(html.escape(data, quote=False))
+        if self.raw_depth:
+            self.raw_html.append(html.escape(data, quote=False))
         elif self.in_pre and not self.legacy:
             self.pre_text.append(data)
         elif self.in_pre:
@@ -223,9 +252,23 @@ class _Md(HTMLParser):
             if not self.legacy and not self.in_code:
                 # Буквальные ` в тексте не должны открывать код в Markdown.
                 text = text.replace("`", "\\`")
+            if not self.old_inline and not self.in_code:
+                # Неразрывный пробел в Markdown неотличим от обычного и теряется на краях строки.
+                text = text.replace("\xa0", "&nbsp;")
             if not self.old_quotes and self.parts and self.parts[-1].endswith("\n"):
                 # Строка после <br> или в начале блока не начинается с пробела.
                 text = text.lstrip(" ")
+            if self.mark_fresh and not self.old_inline and text.startswith(" ") and self.parts:
+                # «** текст**» тоже не жирный: пробел ставится перед звёздочками.
+                mark = self.parts.pop()
+                text = text.lstrip(" ")
+                if self.parts and not self.parts[-1].endswith((" ", "\n")):
+                    self._emit(" ")
+                self._emit(mark)
+            self.mark_fresh = False
+            if not self.old_inline and not self.in_code and (not self.parts or self.parts[-1].endswith("\n")):
+                # Текст в начале строки не должен читаться как пункт списка, заголовок или цитата.
+                text = re.sub(r"^([-+#>])|^(\d+)(?=\. )", lambda m: f"\\{m[1]}" if m[1] else f"{m[2]}\\", text)
             if text.strip() or (self.parts and not self.parts[-1].endswith(("\n", " "))):
                 self._emit(text)
 
@@ -241,10 +284,18 @@ def code_fence(text):
     return "`" * max(3, longest + 1)
 
 
-def html_to_md(source, legacy=False, old_quotes=False, old_blocks=False):
+def _attributes(attrs):
+    """Атрибуты для Markdown: {width="870" name="x"}."""
+    if not attrs:
+        return ""
+    return "{" + " ".join(f'{name}="{html.escape(value or "")}"' for name, value in attrs.items()) + "}"
+
+
+def html_to_md(source, fmt=LATEST_FORMAT, legacy=False):
+    """legacy=True — то же, что fmt=1 (самый старый вывод)."""
     if not source:
         return ""
-    parser = _Md(legacy=legacy, old_quotes=old_quotes, old_blocks=old_blocks)
+    parser = _Md(fmt=1 if legacy else fmt)
     parser.feed(source)
     parser.close()
     return parser.result()
@@ -257,23 +308,37 @@ def html_to_md(source, legacy=False, old_quotes=False, old_blocks=False):
 def _inline(text):
     """Строчная разметка: `код`, картинки, ссылки, **жирный**, *курсив*."""
     codes = []
+    # «\-», «\#», «\>», «1\.» в начале строки — обычный текст, а не разметка блока.
+    text = re.sub(r"^\\(?=[-+#>])|^(\d+)\\(?=\.)", lambda m: m[1] or "", text)
     # \` — буквальная обратная кавычка, а не начало кода.
     text = text.replace("\\`", "\x00")
     # Код заменяется метками, чтобы **жирный** и *курсив* находили пару через `код`.
     text = re.sub(r"`([^`]+)`", lambda m: codes.append(m[1]) or f"\x01{len(codes) - 1}\x02", text)
     text = html.escape(text, quote=False)
     text = re.sub(
-        r"!\[([^\]]*)\]\(([^)\s]+)\)",
-        lambda m: f'<img alt="{html.escape(m[1])}" src="{html.escape(m[2])}">', text,
+        r"!\[([^\]]*)\]\(([^)\s]+)\)(?:\{([^}]*)\})?",
+        lambda m: f'<img alt="{html.escape(m[1])}" src="{html.escape(m[2])}"{_html_attributes(m[3])}>', text,
     )
     text = re.sub(
         r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)",
         lambda m: f'<a href="{html.escape(m[2])}">{m[1]}</a>', text,
     )
+    # ***текст*** — жирный курсив; без отдельного правила теги вкладывались крест-накрест.
+    text = re.sub(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*", r"<em><strong>\1</strong></em>", text)
     text = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<![*\w])\*(?=\S)(.+?)(?<=\S)\*(?![*\w])", r"<em>\1</em>", text)
+    text = text.replace("&lt;br&gt;", "<br>")  # строка «<br>» — второй перенос подряд
+    text = text.replace("&amp;nbsp;", "&nbsp;")
     text = re.sub(r"\x01(\d+)\x02", lambda m: f"<code>{html.escape(codes[int(m[1])], quote=False)}</code>", text)
     return text.replace("\x00", "`")
+
+
+def _html_attributes(spec):
+    """{width="870"} из Markdown -> ' width="870"'."""
+    if not spec:
+        return ""
+    return "".join(f' {name}="{html.escape(html.unescape(value))}"'
+                   for name, value in re.findall(r'([\w-]+)="([^"]*)"', spec))
 
 
 def _paragraph(lines):
@@ -292,11 +357,12 @@ def _list(lines):
     """Вложенность по отступу в 2 пробела, как пишет html_to_md."""
     out = []
     stack = []  # [(тег, глубина)]
-    for line in lines:
+    for number, line in enumerate(lines):
         match = LIST_ITEM.match(line)
         if not match:
-            # Продолжение предыдущего пункта.
-            out[-1] = out[-1][:-len("</li>")] + " " + _inline(line.strip()) + "</li>"
+            # Продолжение предыдущего пункта; «  » в конце прошлой строки — перенос <br>.
+            joint = "<br>" if number and lines[number - 1].endswith("  ") else " "
+            out[-1] = out[-1][:-len("</li>")] + joint + _inline(line.strip()) + "</li>"
             continue
         depth = len(match[1]) // 2
         tag = "ol" if match[2][0].isdigit() else "ul"
@@ -309,7 +375,7 @@ def _list(lines):
                 out[-1] = out[-1][:-len("</li>")]
             out.append(f"<{tag}>")
             stack.append((tag, depth))
-        out.append(f"<li>{_inline(match[3])}</li>")
+        out.append(f"<li>{_inline(match[3].rstrip())}</li>")
     while stack:
         out.append(f"</{stack.pop()[0]}>")
         if stack:
@@ -334,7 +400,7 @@ def md_to_html(markdown):
         if not line.strip():
             index += 1
             continue
-        fence = re.match(r"^(`{3,})\s*([\w+#-]*)\s*$", line)
+        fence = re.match(r"^(`{3,})\s*([\w+#-]*)\s*(\{[^}]*\})?\s*$", line)
         if fence:
             body = []
             index += 1
@@ -344,7 +410,7 @@ def md_to_html(markdown):
                 index += 1
             index += 1
             lang = f' class="language-{fence[2]}"' if fence[2] else ""
-            blocks.append(f"<pre><code{lang}>{html.escape(chr(10).join(body), quote=False)}</code></pre>")
+            blocks.append(f"<pre{_html_attributes(fence[3])}><code{lang}>{html.escape(chr(10).join(body), quote=False)}</code></pre>")
             continue
         block_tag = re.match(r"^<(table|details)\b[^>]*>", line)
         if block_tag:

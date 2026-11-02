@@ -7,7 +7,7 @@ from test_steps import CHOICE, CODE, TABLE
 
 class RoundTripReportTests(unittest.TestCase):
     def test_report_counts_types(self):
-        text = {"id": 2, "lesson": 10, "block": {"name": "text", "text": '<p><a href="x">ссылка</a></p>'}}
+        text = {"id": 2, "lesson": 10, "block": {"name": "text", "text": '<p><a href="x" rel="nofollow">ссылка</a></p>'}}
         report = roundtrip.check_sources([CHOICE, CODE, TABLE, text])
         self.assertEqual((report["step_count"], report["passed"], report["failed"]), (4, 4, 0))
         self.assertEqual(report["by_type"]["choice"], "1/1")

@@ -58,7 +58,7 @@ class ListParagraphTests(unittest.TestCase):
         self.assertEqual(md_to_html(html_to_md(source)), "<blockquote><p>a</p>\n<ul><li>b</li></ul>\n<p>c</p></blockquote>")
 
     def test_old_quote_mode_reproduces_format_2(self):
-        self.assertEqual(html_to_md("<blockquote><p>x</p></blockquote>", old_quotes=True), "> \n\nx")
+        self.assertEqual(html_to_md("<blockquote><p>x</p></blockquote>", fmt=2), "> \n\nx")
 
     def test_table_kept_as_html(self):
         # Таблицы терялись при правке шага: в Markdown урока не было их записи.
@@ -85,7 +85,50 @@ class ListParagraphTests(unittest.TestCase):
                          "<blockquote><p>Q</p>\n<details open><summary>S</summary><p>h</p></details></blockquote>")
 
     def test_old_blocks_mode_reproduces_format_3(self):
-        self.assertEqual(html_to_md("<table><tr><td>a</td></tr></table>", old_blocks=True), "a")
+        self.assertEqual(html_to_md("<table><tr><td>a</td></tr></table>", fmt=3), "a")
+
+    def test_format_5_keeps_styles_sizes_links(self):
+        source = ('<h2 style="text-align:center;">Урок</h2>'
+                  '<pre style="background:#2d3436; color:#ffffff;"><code class="language-python">x = 1</code></pre>'
+                  '<p>См. <a href="https://docs.python.org">документацию</a> и '
+                  '<img alt="схема" src="https://x/s.png" width="870"></p>')
+        markdown = html_to_md(source)
+        self.assertIn('<h2 style="text-align:center;">Урок</h2>', markdown)
+        self.assertIn('```python {style="background:#2d3436; color:#ffffff;"}', markdown)
+        self.assertIn("[документацию](https://docs.python.org)", markdown)
+        self.assertIn('![схема](https://x/s.png){width="870"}', markdown)
+        back = md_to_html(markdown)
+        self.assertIn('<pre style="background:#2d3436; color:#ffffff;"><code class="language-python">x = 1</code></pre>', back)
+        self.assertIn('<a href="https://docs.python.org">документацию</a>', back)
+        self.assertIn('<img alt="схема" src="https://x/s.png" width="870">', back)
+        self.assertNotIn("style", html_to_md(source, fmt=4).split("```")[1].split("\n")[0])
+
+    def test_space_inside_bold_moves_outside(self):
+        # «**Вопрос: **» в Markdown не жирный: на Stepik ушли бы звёздочки.
+        for space in (" ", "\xa0"):
+            source = f"<p><strong>Вопрос:{space}</strong>Текст и <em> курсив</em></p>"
+            back = md_to_html(html_to_md(source))
+            self.assertIn("<strong>Вопрос:", back)
+            self.assertIn("<em>курсив</em>", back)
+            self.assertNotIn("**", back)
+
+    def test_double_break_and_nbsp_survive(self):
+        source = "<p>a<br><br>b</p><h3>\xa0</h3><p>\xa0</p>"
+        markdown = html_to_md(source)
+        self.assertEqual(md_to_html(markdown), "<p>a<br>\n<br>\nb</p>\n<h3>&nbsp;</h3>\n<p>&nbsp;</p>")
+
+    def test_text_that_looks_like_markup_stays_text(self):
+        source = "<blockquote><p><strong>Цель:</strong><br>- первое<br>1. второе<br># третье</p></blockquote>"
+        back = md_to_html(html_to_md(source))
+        self.assertNotIn("<ul>", back)
+        self.assertNotIn("<ol>", back)
+        self.assertNotIn("<h1>", back)
+        self.assertIn("- первое", back)
+        self.assertIn("1. второе", back)
+
+    def test_break_inside_list_item(self):
+        source = "<ul><li><code>a</code> — первое.<br>Пример: <code>b</code></li></ul>"
+        self.assertEqual(md_to_html(html_to_md(source)), "<ul><li><code>a</code> — первое.<br>Пример: <code>b</code></li></ul>")
 
     def test_literal_asterisks_stay_text(self):
         markdown = html_to_md("<p>2**3 и a*b*c</p>")

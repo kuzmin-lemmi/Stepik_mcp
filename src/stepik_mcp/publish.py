@@ -45,7 +45,7 @@ from pathlib import Path
 from . import steps
 from .client import StepikError
 from .solution import run_solution
-from .render import html_to_md, md_to_html, render_step
+from .render import STYLED_BLOCKS, html_to_md, md_to_html, render_step
 from .workspace import (_atomic_write, _inside, course_structure, load_step_source, merge_structure,
                         save_index, save_step_sources, workspace_root)
 
@@ -64,34 +64,38 @@ class _Features(HTMLParser):
     """Что из HTML шага пропадёт при публикации из Markdown."""
 
     KNOWN = {"p", "br", "strong", "b", "em", "i", "code", "pre", "img", "h1", "h2", "h3",
-             "h4", "h5", "h6", "ul", "ol", "li", "blockquote", "div", "span", "details", "summary"}
+             "h4", "h5", "h6", "ul", "ol", "li", "blockquote", "div", "span", "details", "summary", "a"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.found = set()
-        self.tables = 0  # таблица переходит в файл урока HTML-ом как есть
+        self.raw = []     # таблица или блок со стилем переходят в файл урока HTML-ом как есть
+        self.lists = 0
 
     def handle_endtag(self, tag):
-        if tag == "table" and self.tables:
-            self.tables -= 1
+        if self.raw and tag == self.raw[-1]:
+            self.raw.pop()
+        elif tag in ("ul", "ol") and self.lists:
+            self.lists -= 1
 
     def handle_starttag(self, tag, attrs):
-        if tag == "table":
-            self.tables += 1
-        if self.tables:
+        if self.raw:
+            self.raw += [tag] if tag == self.raw[0] else []
             return
-        if tag == "a":
-            self.found.add("ссылки (в Markdown урока нет адресов ссылок)")
-        elif tag in ("iframe", "video", "audio", "script", "object", "embed"):
+        if tag == "table" or (tag in STYLED_BLOCKS and dict(attrs).get("style") and not self.lists):
+            self.raw.append(tag)
+            return
+        if tag in ("ul", "ol"):
+            self.lists += 1
+        if tag in ("iframe", "video", "audio", "script", "object", "embed"):
             self.found.add(f"встроенные элементы <{tag}>")
         elif tag not in self.KNOWN:
             self.found.add(f"теги <{tag}>")
         for name, _ in attrs:
-            if (tag, name) in (("img", "src"), ("img", "alt"), ("a", "href")):
+            # Markdown урока передаёт адрес ссылки, атрибуты картинки, язык и стиль блока кода.
+            if (tag, name) in (("a", "href"), ("code", "class"), ("pre", "style")) or tag in ("img", "details"):
                 continue
-            if (tag == "code" and name == "class") or tag == "details":  # <details> копируется с атрибутами
-                continue
-            self.found.add("атрибуты оформления (style, class, размеры картинок)")
+            self.found.add(f"атрибуты оформления ({tag} {name})")
 
 
 def _lossy_features(source_html):
@@ -108,13 +112,15 @@ _SAME_TAG = {"b": "strong", "i": "em", "div": "p"}
 
 def _tag_sequence(source_html):
     out = []
-    lists = 0
+    lists = quotes = 0
     for slash, name in re.findall(r"<(/?)(\w+)", source_html or ""):
         name = _SAME_TAG.get(name.lower(), name.lower())
         if name in ("ul", "ol"):
             lists += -1 if slash else 1
-        # <p> внутри пунктов списка ставит редактор Stepik; без него пункт выглядит так же.
-        if name in _STRUCTURE_TAGS and not (name == "p" and lists > 0):
+        if name in ("blockquote", "details"):
+            quotes += -1 if slash else 1
+        # <p> внутри пунктов списка, цитат и спойлеров ставит редактор Stepik; без него блок выглядит так же.
+        if name in _STRUCTURE_TAGS and not (name == "p" and (lists > 0 or quotes > 0)):
             out.append(slash + name)
     return out
 
@@ -134,7 +140,7 @@ def _edit_losses(source_html):
 
 def _old_render_differs(source_html, fmt):
     """Файл старого формата показывает этот шаг иначе, чем текущий загрузчик."""
-    old = html_to_md(source_html, legacy=fmt < 2, old_quotes=fmt < 3, old_blocks=fmt < 4)
+    old = html_to_md(source_html, fmt=fmt)
     return old != html_to_md(source_html)
 
 
