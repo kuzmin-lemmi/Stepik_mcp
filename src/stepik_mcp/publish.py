@@ -47,7 +47,7 @@ from .client import StepikError
 from .solution import run_solution
 from .render import html_to_md, md_to_html, render_step
 from .workspace import (_atomic_write, _inside, course_structure, load_step_source, merge_structure,
-                        save_index, save_step_sources)
+                        save_index, save_step_sources, workspace_root)
 
 IMAGE_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -237,7 +237,7 @@ def allowed_write_courses():
             allowed.add(ANY_COURSE)
         elif part:
             if not part.isdigit():
-                raise StepikError("ALLOWED_WRITE_COURSES: ожидаются ID курсов через запятую или «*»")
+                raise StepikError("CONFIG_INVALID: ALLOWED_WRITE_COURSES — ожидаются ID курсов через запятую или «*»")
             allowed.add(int(part))
     return allowed
 
@@ -266,11 +266,7 @@ def _check_allowed(client, course_id):
 
 
 def _course_folder(course_id):
-    root = Path(os.environ.get("COURSE_WORKSPACE_ROOT", r"C:\Courses"))
-    if not root.is_absolute():
-        raise StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
-    if any(path.is_symlink() or path.is_junction() for path in (root, *root.parents)):
-        raise StepikError("Workspace root must not pass through symlinks or junctions")
+    root = workspace_root()
     folder = _inside(root, f"course-{course_id}")
     if not _inside(folder, ".course.json").is_file():
         raise StepikError("Папка курса не создана: сначала скачайте урок через stepik_cache_lesson", status=404)

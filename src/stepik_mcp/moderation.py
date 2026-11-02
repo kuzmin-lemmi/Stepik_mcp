@@ -13,15 +13,13 @@ all_in_lesson берёт все комментарии одного урока: 
 import hashlib
 import html
 import json
-import os
 import re
 import secrets
 from datetime import datetime, timezone
-from pathlib import Path
 
 from .client import StepikError, collect_limited
 from .publish import _check_allowed, _log
-from .workspace import _atomic_write, _inside
+from .workspace import _atomic_write, _inside, workspace_root
 
 MAX_COMMENTS = 5000
 PREVIEW = 120
@@ -43,11 +41,7 @@ def _now():
 
 def _service_folder(course_id):
     """Папка курса для планов и журнала; создаётся, если курс ещё не скачивали."""
-    root = Path(os.environ.get("COURSE_WORKSPACE_ROOT", r"C:\Courses"))
-    if not root.is_absolute():
-        raise StepikError("COURSE_WORKSPACE_ROOT must be an absolute path")
-    if any(path.is_symlink() or path.is_junction() for path in (root, *root.parents)):
-        raise StepikError("Workspace root must not pass through symlinks or junctions")
+    root = workspace_root()
     folder = _inside(root, f"course-{course_id}")
     _inside(folder, ".stepik/plans").mkdir(parents=True, exist_ok=True)
     return folder

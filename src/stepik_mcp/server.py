@@ -8,8 +8,9 @@
 и только в курсы из ALLOWED_WRITE_COURSES («*» — любой свой курс).
 """
 
-import os
 import json
+import os
+import re
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
@@ -35,7 +36,7 @@ mcp = MCPServer(
     name="stepik",
     instructions=(
         "Запись на Stepik только через stepik_plan_push -> показ diff автору -> явное подтверждение -> stepik_apply_push. "
-        "stepik_cache_lesson записывает рабочий Markdown локально в C:\\Courses. "
+        "stepik_cache_lesson записывает рабочий Markdown в локальную папку курсов (COURSE_WORKSPACE_ROOT). "
         "Для получения урока по номеру используй stepik_cache_lesson: ответ содержит путь, а не полный текст. "
         "Затем читай и редактируй локальный файл только в нужном объёме. Не дублируй весь урок в чате. "
         "Для структуры курса используй stepik_course_outline; stepik_lesson нужен для явного вывода текста в чат. "
@@ -46,6 +47,31 @@ mcp = MCPServer(
 )
 
 
+# Только GET к Stepik; LOCAL_WRITE ещё создаёт файлы в папке курса, но не перезаписывает их.
+READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+LOCAL_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True,
+                              open_world_hint=True)
+
+
+HTTP_CODES = {400: "BAD_REQUEST", 401: "AUTH_FAILED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT",
+              429: "RATE_LIMITED"}
+
+
+def error_json(code, message):
+    """Единый формат ошибки инструмента: {status, code, message}."""
+    return json.dumps({"status": "error", "code": code, "message": message}, ensure_ascii=False, indent=2)
+
+
+def _error(exc):
+    if isinstance(exc, StepikError):
+        # Код в начале сообщения («WRITE_NOT_ALLOWED: ...») главнее HTTP-статуса.
+        match = re.match(r"([A-Z][A-Z_]{3,}): *(.*)", str(exc), re.DOTALL)
+        if match:
+            return error_json(match[1], match[2])
+        return error_json(HTTP_CODES.get(exc.status, "STEPIK_ERROR"), str(exc))
+    return error_json("INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
+
+
 def _guard():
     """Вместо стектрейса возвращаем человеку понятную причину."""
     missing = [
@@ -53,7 +79,7 @@ def _guard():
         if not os.environ.get(name)
     ]
     if missing:
-        return "Не заданы переменные окружения: " + ", ".join(missing)
+        return error_json("CONFIG_MISSING", "Не заданы переменные окружения: " + ", ".join(missing))
     return None
 
 
@@ -63,13 +89,19 @@ def _run(func, *args, **kwargs):
         return problem
     try:
         return func(*args, **kwargs)
-    except StepikError as exc:
-        return f"Ошибка Stepik: {exc}"
     except Exception as exc:
-        return f"Ошибка MCP ({type(exc).__name__}): {exc}"
+        return _error(exc)
 
 
-@mcp.tool(description="Проверить связь с Stepik и показать, под каким аккаунтом работает токен.")
+def _local(func, *args):
+    """Инструменты локальной папки: работают и без OAuth, если Stepik не нужен."""
+    try:
+        return json.dumps(func(CLIENT, *args), ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool(annotations=READ_ONLY, description="Проверить связь с Stepik и показать, под каким аккаунтом работает токен.")
 def stepik_whoami() -> str:
     def work():
         payload = CLIENT.get("stepics/1")
@@ -81,7 +113,7 @@ def stepik_whoami() -> str:
     return _run(work)
 
 
-@mcp.tool(description="Список курсов, где указанный аккаунт значится преподавателем. По умолчанию — текущий аккаунт.")
+@mcp.tool(annotations=READ_ONLY, description="Список курсов, где указанный аккаунт значится преподавателем. По умолчанию — текущий аккаунт.")
 def stepik_my_courses(user_id: int | None = None) -> str:
     def work():
         uid = user_id
@@ -98,45 +130,30 @@ def stepik_my_courses(user_id: int | None = None) -> str:
     return _run(work)
 
 
-@mcp.tool(description="Структура курса: секции, уроки и id каждого урока. Отсюда берутся id для stepik_lesson.")
+@mcp.tool(annotations=READ_ONLY, description="Структура курса: секции, уроки и id каждого урока. Отсюда берутся id для stepik_lesson.")
 def stepik_course_outline(course_id: int) -> str:
     return _run(render_course, CLIENT, course_id)
 
 
-@mcp.tool(description="Полный текст урока со всеми шагами в markdown. answers=False скрывает правильные ответы.")
+@mcp.tool(annotations=READ_ONLY, description="Полный текст урока со всеми шагами в markdown. answers=False скрывает правильные ответы.")
 def stepik_lesson(lesson_id: int, answers: bool = True) -> str:
     return _run(render_lesson, CLIENT, lesson_id, False, answers)
 
 
-@mcp.tool(description="Сохраняет один опубликованный урок в локальный Markdown в C:\\Courses, создавая папки всех модулей курса. lesson_position: номер вида 6.2. Возвращает только путь и краткие сведения, без текста и аналитики. Существующий файл не перезаписывается и не скачивается повторно. Только GET к Stepik, запись только в локальное workspace.")
+@mcp.tool(annotations=LOCAL_WRITE, description="Сохраняет один опубликованный урок в локальный Markdown в папке курсов, создавая папки всех модулей курса. lesson_position: номер вида 6.2. Возвращает только путь и краткие сведения, без текста и аналитики. Существующий файл не перезаписывается и не скачивается повторно. Только GET к Stepik, запись только в локальное workspace.")
 def stepik_cache_lesson(course_id: int, lesson_position: str) -> str:
     # Cached files remain usable even without OAuth variables in this process.
-    try:
-        return json.dumps(sw.cache_lesson(CLIENT, course_id, lesson_position), ensure_ascii=False, indent=2)
-    except StepikError as exc:
-        return f"Ошибка Stepik Workspace: {exc}"
-    except Exception as exc:
-        return f"Ошибка Workspace ({type(exc).__name__}): {exc}"
+    return _local(sw.cache_lesson, course_id, lesson_position)
 
 
-@mcp.tool(description="Сохраняет комментарии и ответы к обычным обсуждениям одного уже кэшированного урока в отдельный .comments.md рядом с уроком. lesson_position: номер вида 6.1. Возвращает только путь и краткие сведения. Существующий файл комментариев не перезаписывается; вкладка решений, статистика и текст урока не загружаются.")
+@mcp.tool(annotations=LOCAL_WRITE, description="Сохраняет комментарии и ответы к обычным обсуждениям одного уже кэшированного урока в отдельный .comments.md рядом с уроком. lesson_position: номер вида 6.1. Возвращает только путь и краткие сведения. Существующий файл комментариев не перезаписывается; вкладка решений, статистика и текст урока не загружаются.")
 def stepik_cache_lesson_comments(course_id: int, lesson_position: str) -> str:
-    try:
-        return json.dumps(sw.cache_lesson_comments(CLIENT, course_id, lesson_position), ensure_ascii=False, indent=2)
-    except StepikError as exc:
-        return f"Ошибка Stepik Workspace: {exc}"
-    except Exception as exc:
-        return f"Ошибка Workspace ({type(exc).__name__}): {exc}"
+    return _local(sw.cache_lesson_comments, course_id, lesson_position)
 
 
-@mcp.tool(description="Сохраняет все уроки курса в C:\\Courses, но в каждый Markdown помещает только шаги типа text. Задания, code, тесты, видео, комментарии и аналитика не сохраняются. Существующие локальные файлы не перезаписываются. Возвращает краткую сводку и пути, без текста уроков.")
+@mcp.tool(annotations=LOCAL_WRITE, description="Сохраняет все уроки курса в папку курсов, но в каждый Markdown помещает только шаги типа text. Задания, code, тесты, видео, комментарии и аналитика не сохраняются. Существующие локальные файлы не перезаписываются. Возвращает краткую сводку и пути, без текста уроков.")
 def stepik_cache_course_text_lessons(course_id: int) -> str:
-    try:
-        return json.dumps(sw.cache_course_text_lessons(CLIENT, course_id), ensure_ascii=False, indent=2)
-    except StepikError as exc:
-        return f"Ошибка Stepik Workspace: {exc}"
-    except Exception as exc:
-        return f"Ошибка Workspace ({type(exc).__name__}): {exc}"
+    return _local(sw.cache_course_text_lessons, course_id)
 
 
 @mcp.tool(
@@ -266,7 +283,7 @@ def stepik_check_roundtrip(course_id: int) -> str:
     return _run(lambda: json.dumps(roundtrip.check_course(CLIENT, course_id), ensure_ascii=False, indent=2))
 
 
-@mcp.tool(description="Один шаг по его внутреннему id (не по номеру в уроке).")
+@mcp.tool(annotations=READ_ONLY, description="Один шаг по его внутреннему id (не по номеру в уроке).")
 def stepik_step(step_id: int, answers: bool = True) -> str:
     def work():
         sources = CLIENT.by_ids("step-sources", [step_id], key="step-sources")
@@ -276,46 +293,46 @@ def stepik_step(step_id: int, answers: bool = True) -> str:
     return _run(work)
 
 
-@mcp.tool(description="Принимает ссылку, скопированную из адресной строки Stepik: на курс, урок или конкретный шаг.")
+@mcp.tool(annotations=READ_ONLY, description="Принимает ссылку, скопированную из адресной строки Stepik: на курс, урок или конкретный шаг.")
 def stepik_resolve(url: str, answers: bool = True) -> str:
     return _run(resolve_url, CLIENT, url, False, answers)
 
 
-@mcp.tool(description="Все обычные комментарии и ответы к одному шагу с именами авторов, без вкладки решений. Для всего урока используй stepik_lesson_comments. Только чтение.")
+@mcp.tool(annotations=READ_ONLY, description="Все обычные комментарии и ответы к одному шагу с именами авторов, без вкладки решений. Для всего урока используй stepik_lesson_comments. Только чтение.")
 def stepik_step_comments(step_id: int) -> str:
     return _run(render_step_comments, CLIENT, step_id)
 
 
-@mcp.tool(description="Все обычные комментарии и ответы по шагам урока, без вкладки решений. Пакетная загрузка одним вызовом, группировка по номеру шага, без лимита количества.")
+@mcp.tool(annotations=READ_ONLY, description="Все обычные комментарии и ответы по шагам урока, без вкладки решений. Пакетная загрузка одним вызовом, группировка по номеру шага, без лимита количества.")
 def stepik_lesson_comments(lesson_id: int) -> str:
     return _run(render_lesson_comments, CLIENT, lesson_id)
 
 
-@mcp.tool(description="Агрегаты самого урока: просмотры, число полностью прошедших, среднее время (API: секунды, также выводятся минуты). Указывает источники и недоступные поля. course_id проверяет принадлежность урока курсу, но не фильтрует статистику по его ученикам.")
+@mcp.tool(annotations=READ_ONLY, description="Агрегаты самого урока: просмотры, число полностью прошедших, среднее время (API: секунды, также выводятся минуты). Указывает источники и недоступные поля. course_id проверяет принадлежность урока курсу, но не фильтрует статистику по его ученикам.")
 def stepik_lesson_stats(lesson_id: int, course_id: int | None = None) -> str:
     return _run(render_lesson_stats, CLIENT, lesson_id, course_id)
 
 
-@mcp.tool(description="Статистика задания/шага: попытки, успешность, число решивших, оценки/реакции если API их возвращает.")
+@mcp.tool(annotations=READ_ONLY, description="Статистика задания/шага: попытки, успешность, число решивших, оценки/реакции если API их возвращает.")
 def stepik_step_stats(step_id: int, max_submissions: int = 2000) -> str:
     max_submissions = max(20, min(max_submissions, 10000))
     return _run(render_step_stats, CLIENT, step_id, max_submissions)
 
 
-@mcp.tool(description="Обезличенная выборка неверных решений учащихся для анализа типичных ошибок. Имена/email/user_id не выводятся.")
+@mcp.tool(annotations=READ_ONLY, description="Обезличенная выборка неверных решений учащихся для анализа типичных ошибок. Имена/email/user_id не выводятся.")
 def stepik_wrong_submissions(step_id: int, limit: int = 10, scan_limit: int = 1000) -> str:
     limit = max(1, min(limit, 50))
     scan_limit = max(limit, min(scan_limit, 10000))
     return _run(render_wrong_submissions, CLIENT, step_id, limit, scan_limit)
 
 
-@mcp.tool(description="Отзывы учащихся по всему курсу Stepik; при наличии API также показывает сводку оценок.")
+@mcp.tool(annotations=READ_ONLY, description="Отзывы учащихся по всему курсу Stepik; при наличии API также показывает сводку оценок.")
 def stepik_course_reviews(course_id: int, limit: int = 100) -> str:
     limit = max(1, min(limit, 500))
     return _run(render_course_reviews, CLIENT, course_id, limit)
 
 
-@mcp.tool(description="Пакет для AI-редактора: текст урока + программные задачи + комментарии + статистика + выборка неверных code-решений.")
+@mcp.tool(annotations=READ_ONLY, description="Пакет для AI-редактора: текст урока + программные задачи + комментарии + статистика + выборка неверных code-решений.")
 def stepik_lesson_bundle(
     lesson_id: int,
     answers: bool = True,

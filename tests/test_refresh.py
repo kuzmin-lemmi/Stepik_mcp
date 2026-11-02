@@ -165,6 +165,7 @@ class PullCourseTests(unittest.TestCase):
         info = (self.folder / "COURSE_INFO.md").read_text(encoding="utf-8")
         self.assertIn("Авторы: Автор", info)
         self.assertIn("Длинное **описание**", info)
+        self.assertEqual((self.folder / "CLAUDE.md").read_text(encoding="utf-8"), "@AGENTS.md\n")
 
     def test_pull_keeps_existing_files_and_adds_new_lessons(self):
         sw.cache_lesson(self.client, 1, "1.1")

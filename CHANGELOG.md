@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Изменено
+
+- Ошибки всех инструментов возвращаются JSON-ом `{"status": "error", "code", "message"}`: код берётся из начала сообщения (`WRITE_NOT_ALLOWED`, `LOCAL_CHANGED`, …) или из HTTP-статуса (`NOT_FOUND`, `CONFLICT`, …); `CONFIG_MISSING` — не заданы ключи Stepik.
+- Папка курсов по умолчанию — `C:\Courses` в Windows и `~/Courses` в Linux и macOS; `COURSE_WORKSPACE_ROOT` больше не обязательна. Описания инструментов не называют `C:\Courses`.
+- Все инструменты размечены аннотациями MCP: чтение — `readOnlyHint`, сохранение в папку курса — неразрушающая запись.
+- В папке курса рядом с `AGENTS.md` создаётся `CLAUDE.md` со строкой `@AGENTS.md`.
+
 ### Добавлено
 
 - `stepik_plan_create_lesson`: план создания урока из локального черновика (название из `title:` или «# …», шаги — `<!-- new_step -->`). `stepik_apply_push` создаёт пустой урок, привязывает его к модулю на нужную позицию, записывает ID в черновик и `.course.json` и сохраняет прежний черновик в `snapshots/`; шаги затем публикуются через `stepik_plan_push`. На Stepik ещё не проверено.

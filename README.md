@@ -95,7 +95,7 @@ Linux / macOS:
 claude mcp add stepik --scope user -e STEPIK_CLIENT_ID=<client_id> -e STEPIK_CLIENT_SECRET=<client_secret> -- /path/to/Stepik_mcp/.venv/bin/stepik-mcp
 ```
 
-В Windows укажите путь вида `C:\path\to\Stepik_mcp\.venv\Scripts\stepik-mcp.exe`. На Linux и macOS добавьте `-e COURSE_WORKSPACE_ROOT=/абсолютный/путь`. Проверьте подключение командой `claude mcp get stepik`.
+В Windows укажите путь вида `C:\path\to\Stepik_mcp\.venv\Scripts\stepik-mcp.exe`. Папка курсов по умолчанию — `C:\Courses` в Windows и `~/Courses` в Linux и macOS; другую задайте через `-e COURSE_WORKSPACE_ROOT=/абсолютный/путь`. Проверьте подключение командой `claude mcp get stepik`.
 
 </details>
 
@@ -284,7 +284,7 @@ C:\Courses\course-266999\
 | --- | --- | --- |
 | `STEPIK_CLIENT_ID` | OAuth Client ID | — |
 | `STEPIK_CLIENT_SECRET` | OAuth Client secret | — |
-| `COURSE_WORKSPACE_ROOT` | Абсолютный путь к папке курсов. **Обязательна на Linux и macOS** | `C:\Courses` |
+| `COURSE_WORKSPACE_ROOT` | Абсолютный путь к папке курсов | `C:\Courses` в Windows, `~/Courses` в Linux и macOS |
 | `STEPIK_BASE_URL` | Адрес Stepik | `https://stepik.org` |
 | `STEPIK_TIMEOUT` | Таймаут запроса, секунды | `30` |
 | `ALLOWED_WRITE_COURSES` | Куда разрешена публикация: ID курсов через запятую или `*` — любой курс, где аккаунт токена автор или преподаватель | пусто, запись запрещена |
