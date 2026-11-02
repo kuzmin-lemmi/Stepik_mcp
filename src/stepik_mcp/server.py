@@ -14,7 +14,7 @@ import json
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import moderation, publish, roundtrip
+from . import moderation, publish, refresh, roundtrip
 from . import workspace as sw
 from .analytics import render_lesson_bundle, render_lesson_stats, render_step_stats
 from .client import StepikClient, StepikError
@@ -137,6 +137,32 @@ def stepik_cache_course_text_lessons(course_id: int) -> str:
         return f"Ошибка Stepik Workspace: {exc}"
     except Exception as exc:
         return f"Ошибка Workspace ({type(exc).__name__}): {exc}"
+
+
+@mcp.tool(
+    description="Скачивает весь курс в локальную папку: все уроки со всеми типами шагов (условие в Markdown, "
+    "настройки заданий в YAML-блоке) и описание курса в COURSE_INFO.md. Структура курса обновляется: новые уроки "
+    "добавляются, у известных остаются прежние пути. Существующие файлы уроков не перезаписываются — для них "
+    "stepik_refresh_lesson. Только GET к Stepik. Возвращает сводку и пути, без текста уроков.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_pull_course(course_id: int) -> str:
+    return _run(lambda: json.dumps(sw.pull_course(CLIENT, course_id), ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Обновляет локальный файл урока со Stepik, не затирая правки автора. Шаг, изменённый только на "
+    "Stepik, заменяется новой версией; изменённый только в файле — остаётся; изменённый и там, и там — конфликт: "
+    "файл в этом шаге не меняется, версия Stepik сохраняется рядом в <урок>.stepik-<время>.md. Новые шаги Stepik "
+    "вставляются на свои места. Без apply=True только показывает изменения. С apply=True прежний файл сохраняется "
+    "в snapshots/. resolved — step_id конфликтов, которые автор уже перенёс вручную: их базой станет версия Stepik. "
+    "Только GET к Stepik; пишет только в локальную папку курса.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True),
+)
+def stepik_refresh_lesson(course_id: int, lesson_position: str, apply: bool = False,
+                          resolved: list[int] | None = None) -> str:
+    return _run(lambda: json.dumps(refresh.refresh_lesson(CLIENT, course_id, lesson_position, apply, resolved),
+                                   ensure_ascii=False, indent=2))
 
 
 @mcp.tool(

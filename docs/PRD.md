@@ -206,8 +206,8 @@ course-266999/
 | `stepik_whoami`, `stepik_my_courses` | Проверка доступа, список курсов | есть |
 | `stepik_course_outline`, `stepik_lesson`, `stepik_step`, `stepik_resolve` | Чтение структуры, урока, шага, ссылки | есть |
 | `stepik_cache_lesson`, `stepik_cache_course_text_lessons` | Сохранение урока и текстовой части курса | есть |
-| `stepik_pull_course` | Полная загрузка курса без потерь | план, этап 2 |
-| `stepik_refresh_lesson`, `stepik_refresh_structure` | Безопасное обновление с Stepik | план, этап 2 |
+| `stepik_pull_course` | Полная загрузка курса без потерь | есть |
+| `stepik_refresh_lesson`, `stepik_refresh_structure` | Безопасное обновление с Stepik | `stepik_refresh_lesson` есть; структуру обновляет `stepik_pull_course` |
 
 Поддерживаемые типы шагов: text, video (метаданные), choice (один и несколько ответов), number, string, math, free-answer, sorting, matching, code и другие типы блоков Stepik. Неизвестный тип не должен приводить к потере данных.
 
