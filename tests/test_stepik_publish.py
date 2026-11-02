@@ -112,6 +112,9 @@ class PublishTests(unittest.TestCase):
         return {"step-sources": [created]}
 
     def put(self, endpoint, payload):
+        if endpoint.startswith("lessons/"):
+            self.data["lessons"][0].update(payload["lesson"])
+            return {"lessons": [self.data["lessons"][0]]}
         row = self.remote(int(endpoint.rsplit("/", 1)[1]))
         row["block"] = payload["stepSource"]["block"]
         if payload["stepSource"].get("position") not in (None, row.get("position")):
@@ -411,6 +414,32 @@ class PublishTests(unittest.TestCase):
                 '<details open><summary>S</summary><p>b</p></details>')
         self.assertEqual(publish._edit_losses(html), [])
         self.assertTrue(publish._lossy_features("<details><summary class='s'>S</summary></details>"))
+
+    def test_rename_lesson_by_title(self):
+        self.edit('title: "Lesson"', 'title: "Новое название"')
+        plan = publish.plan_push(self.client, 1, "1.1")
+        self.assertEqual(plan["changes"], [{"step": "название урока", "status": "RENAME", "было": "Lesson",
+                                            "станет": "Новое название"}])
+        self.assert_no_writes()
+        result = publish.apply_push(self.client, 1, plan["plan_id"])
+        self.assertEqual(result["status"], "published")
+        self.client.put.assert_called_once_with("lessons/1000", {"lesson": {"title": "Новое название"}})
+        self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
+        self.assertIn('"rename"', (self.folder / "logs" / "stepik-write.log").read_text(encoding="utf-8"))
+
+    def test_rename_on_stepik_is_not_overwritten(self):
+        self.data["lessons"][0]["title"] = "Переименован на Stepik"
+        self.assertEqual(publish.plan_push(self.client, 1, "1.1")["status"], "nothing_to_push")
+        self.edit('title: "Lesson"', 'title: "Моё название"')
+        plan = publish.plan_push(self.client, 1, "1.1")
+        self.assertIn("переименован на Stepik", plan["skipped"][0]["reason"])
+
+    def test_title_changed_on_stepik_after_plan(self):
+        self.edit('title: "Lesson"', 'title: "Новое"')
+        plan = publish.plan_push(self.client, 1, "1.1")
+        self.data["lessons"][0]["title"] = "Чужое"
+        self.assertEqual(publish.apply_push(self.client, 1, plan["plan_id"])["status"], "partial")
+        self.assertEqual(self.data["lessons"][0]["title"], "Чужое")
 
     def test_empty_allowlist_by_default(self):
         with patch.dict(os.environ, {"ALLOWED_WRITE_COURSES": ""}):

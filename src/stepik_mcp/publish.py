@@ -29,7 +29,10 @@ plan_rollback строит такой же план возврата шагов 
 
 plan_create_lesson строит план создания нового урока из локального черновика: apply_push
 создаёт пустой урок, привязывает его к модулю и записывает ID в черновик; шаги черновика
-публикуются затем обычным plan_push.
+публикуются затем обычным plan_push. plan_move_lesson и plan_delete_lesson переставляют
+урок внутри модуля и удаляют его; Stepik не сдвигает соседние уроки сам, поэтому после
+записи позиции уроков модуля выставляются явно. Название урока меняется через title:
+во frontmatter файла и публикуется обычным plan_push.
 """
 
 import difflib
@@ -518,11 +521,33 @@ def plan_push(client, course_id, lesson_position):
                           + "\n".join(f"- шаг {position_of[sid]} (step_id {sid})" for sid in step_ids) + "\n"
                           + "\n".join(f"+ шаг {number} (step_id {sid})" for number, sid in enumerate(order, 1))
                           + "\n")
+    rename = _plan_rename(client, lesson_id, item, text)
+    if rename and rename.get("op"):
+        operations.insert(0, rename)
+        summary.insert(0, {"step": "название урока", "status": "RENAME", "было": rename["old_title"],
+                           "станет": rename["title"]})
+        diff_parts.insert(0, f"=== Название урока ===\n- {rename['old_title']}\n+ {rename['title']}\n")
+    elif rename:
+        skipped.append(rename)
     if not operations:
         return {"status": "nothing_to_push", "lesson_id": lesson_id, "skipped": skipped,
                 "note": "Шаги совпадают со Stepik. Ничего не отправлено."}
     return _save_plan(folder, course_id, lesson_position, lesson_id, lesson_path, _sha(data),
                       step_ids, sources, images, operations, summary, skipped, diff_parts)
+
+
+def _plan_rename(client, lesson_id, item, text):
+    """Операция переименования урока по title: во frontmatter, пропуск с причиной или None."""
+    title = _frontmatter_value(text, "title")
+    remote = (client.by_ids("lessons", [lesson_id]) or [{}])[0].get("title")
+    if not isinstance(title, str) or not title.strip() or title.strip() == remote:
+        return None
+    title, base = title.strip(), item.get("title")
+    if base is not None and remote != base:
+        # На Stepik урок переименовали после скачивания: не затираем это название.
+        return {"step": "название урока", "reason": f"урок переименован на Stepik («{remote}») после скачивания; "
+                                                    "поправьте title: в файле или обновите урок"}
+    return {"op": "rename", "title": title, "old_title": remote}
 
 
 def _check_solution(folder, lesson_path, block, body):
@@ -714,6 +739,14 @@ def _fix_order(client, folder, course_id, lesson_id, lesson_path):
     return moves
 
 
+def _remember_title(folder, lesson_position, title):
+    """Новое название — база для следующего плана, как исходники шагов."""
+    index = _inside(folder, ".course.json")
+    manifest = json.loads(index.read_text(encoding="utf-8"))
+    manifest["lessons"][lesson_position]["title"] = title
+    save_index(folder, manifest)
+
+
 def _refresh_bases(client, folder, done):
     """Опубликованная версия шагов становится новой базой для следующих правок."""
     touched = [operation["step_id"] for operation in done
@@ -757,6 +790,8 @@ def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=No
         raise StepikError("План относится к другому курсу", status=400)
     if plan.get("kind") == "create_lesson":
         return _apply_create_lesson(client, folder, plan_path, plan)
+    if plan.get("kind") in ("move_lesson", "delete_lesson"):
+        return _apply_lesson_plan(client, folder, plan_path, plan, confirm_delete)
     needed = {op["step_id"] for op in plan["operations"] if op.get("confirm")}
     missing = sorted(needed - set(confirm_steps or []))
     if missing:
@@ -817,6 +852,17 @@ def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=No
             for operation in ordered:
                 if operation["op"] == "reorder":
                     continue  # порядок выставляется после записи шагов
+                if operation["op"] == "rename":
+                    current = {"op": "rename", "title": operation["title"]}
+                    remote_title = (client.by_ids("lessons", [lesson_id]) or [{}])[0].get("title")
+                    if remote_title != operation["old_title"]:
+                        raise StepikError("REMOTE_CHANGED: название урока на Stepik изменилось после плана")
+                    client.put(f"lessons/{lesson_id}", {"lesson": {"title": operation["title"]}})
+                    _log(folder, course_id=course_id, lesson_id=lesson_id, operation="rename",
+                         old_title=operation["old_title"], new_title=operation["title"], result="ok")
+                    _remember_title(folder, plan["lesson_position"], operation["title"])
+                    done.append(current)
+                    continue
                 markdown = _with_urls(operation.get("markdown", ""), operation.get("images", []), uploaded)
                 if operation["op"] == "delete":
                     sid = operation["step_id"]
@@ -1011,6 +1057,11 @@ def _apply_create_lesson(client, folder, plan_path, plan):
         _log(folder, course_id=course_id, lesson_id=lesson["id"], unit_id=unit["id"], operation="create_unit",
              section_id=plan["section_id"], position=plan["position"], result="ok")
 
+        # Stepik не сдвигает соседние уроки при вставке в середину модуля (проверено на 241862).
+        desired = list(plan["section_units"])
+        desired.insert(plan["position"] - 1, unit["id"])
+        _fix_unit_order(client, folder, course_id, plan["section_id"], desired)
+
         snapshots = _inside(folder, "snapshots")
         snapshots.mkdir(exist_ok=True)
         stamp = _now().strftime("%Y%m%dT%H%M%S%fZ")
@@ -1047,6 +1098,166 @@ def _apply_create_lesson(client, folder, plan_path, plan):
         }
     except StepikError as exc:
         _log(folder, course_id=course_id, operation="create_lesson", result="error", error=str(exc))
+        raise
+    finally:
+        lock.rmdir()
+
+
+# --------------------------------------------------------------------------
+# Порядок, перемещение и удаление уроков
+# --------------------------------------------------------------------------
+
+def _section_units(client, section_id):
+    """Юниты модуля в порядке Stepik: [(unit_id, lesson_id, position)]."""
+    sections = client.by_ids("sections", [section_id])
+    if not sections:
+        raise StepikError(f"Модуль {section_id} не найден", status=404)
+    unit_ids = sections[0].get("units") or []
+    rows = {row["id"]: row for row in client.by_ids("units", unit_ids)} if unit_ids else {}
+    return [(uid, rows[uid]["lesson"], rows[uid].get("position")) for uid in unit_ids]
+
+
+def _fix_unit_order(client, folder, course_id, section_id, desired):
+    """Выставляет позиции уроков модуля по списку unit_id. Stepik не сдвигает соседей сам."""
+    moves = []
+    for _ in range(3):
+        units = _section_units(client, section_id)
+        if [uid for uid, _, _ in units] == desired and [pos for _, _, pos in units] == list(range(1, len(desired) + 1)):
+            return moves
+        if {uid for uid, _, _ in units} != set(desired):
+            raise StepikError("Уроки модуля на Stepik не совпадают с планом: порядок не исправлен")
+        lessons = {uid: lesson for uid, lesson, _ in units}
+        positions = {uid: pos for uid, _, pos in units}
+        for number, uid in enumerate(desired, 1):
+            if positions[uid] == number:
+                continue
+            client.put(f"units/{uid}", {"unit": {"section": section_id, "lesson": lessons[uid], "position": number}})
+            _log(folder, course_id=course_id, lesson_id=lessons[uid], unit_id=uid, operation="move_lesson",
+                 old_position=positions[uid], new_position=number, result="ok")
+            moves.append({"op": "move_lesson", "lesson_id": lessons[uid], "position": number})
+    raise StepikError("Порядок уроков модуля на Stepik не совпал с планом после перестановки")
+
+
+def _refresh_structure(client, folder, course_id):
+    """Перечитывает структуру курса; у известных уроков остаются прежние пути."""
+    old = json.loads(_inside(folder, ".course.json").read_text(encoding="utf-8"))
+    manifest, _, _ = merge_structure(old, course_structure(client, course_id))
+    save_index(folder, manifest)
+    return manifest
+
+
+def _lesson_plan(client, course_id, lesson_position, kind, **extra):
+    _check_allowed(client, course_id)
+    folder = _course_folder(course_id)
+    manifest = json.loads(_inside(folder, ".course.json").read_text(encoding="utf-8"))
+    item = manifest["lessons"].get(lesson_position)
+    if item is None:
+        raise StepikError(f"Урока {lesson_position} нет в .course.json", status=404)
+    _verify_lesson_in_course(client, item["lesson_id"], course_id)
+    units = _section_units(client, item["section_id"])
+    if item["unit_id"] not in [uid for uid, _, _ in units]:
+        raise StepikError("Урок не найден в своём модуле на Stepik: обновите структуру через stepik_pull_course",
+                          status=409)
+    plan_id = _now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+    plans = _inside(folder, ".stepik/plans")
+    plans.mkdir(parents=True, exist_ok=True)
+    plan = {"version": 1, "plan_id": plan_id, "kind": kind, "created_at": _now().isoformat(),
+            "course_id": course_id, "lesson_position": lesson_position, "lesson_id": item["lesson_id"],
+            "unit_id": item["unit_id"], "section_id": item["section_id"],
+            "section_units": [uid for uid, _, _ in units], "operations": [], **extra}
+    _atomic_write(_inside(plans, f"{plan_id}.json"), json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+    return plan, item, units
+
+
+def plan_move_lesson(client, course_id, lesson_position, new_position):
+    """План перестановки урока внутри его модуля. Ничего не отправляет."""
+    module = lesson_position.split(".")[0]
+    folder = _course_folder(course_id)
+    manifest = json.loads(_inside(folder, ".course.json").read_text(encoding="utf-8"))
+    count = sum(1 for key in manifest["lessons"] if key.split(".")[0] == module)
+    if type(new_position) is not int or not 1 <= new_position <= count:
+        raise StepikError(f"Новая позиция урока в модуле {module}: от 1 до {count}", status=400)
+    plan, item, units = _lesson_plan(client, course_id, lesson_position, "move_lesson", new_position=new_position)
+    if [uid for uid, _, _ in units].index(item["unit_id"]) + 1 == new_position:
+        _inside(folder, f".stepik/plans/{plan['plan_id']}.json").unlink()
+        return {"status": "nothing_to_push", "note": f"Урок уже стоит на позиции {module}.{new_position}."}
+    return {"status": "planned", "plan_id": plan["plan_id"], "kind": "move_lesson",
+            "lesson": f"{lesson_position} {item.get('title', '')}".strip(),
+            "move_to": f"{module}.{new_position}",
+            "note": "На Stepik ничего не отправлено. Номера уроков модуля между старой и новой позицией сдвинутся. "
+                    "Применяется stepik_apply_push после подтверждения автора."}
+
+
+def plan_delete_lesson(client, course_id, lesson_position):
+    """План удаления урока со Stepik. Ничего не отправляет."""
+    plan, item, _ = _lesson_plan(client, course_id, lesson_position, "delete_lesson")
+    step_ids, sources = _remote_state(client, item["lesson_id"])
+    learners = max([sources[sid].get("passed_by") or 0 for sid in step_ids] or [0])
+    plan["remote_fingerprint"] = _fingerprint(step_ids, sources)
+    folder = _course_folder(course_id)
+    _atomic_write(_inside(folder, f".stepik/plans/{plan['plan_id']}.json"),
+                  json.dumps(plan, ensure_ascii=False, indent=2) + "\n", replace=True)
+    return {"status": "planned", "plan_id": plan["plan_id"], "kind": "delete_lesson",
+            "lesson": f"{lesson_position} {item.get('title', '')}".strip(), "lesson_id": item["lesson_id"],
+            "step_count": len(step_ids), **({"решили учеников (до)": learners} if learners else {}),
+            "confirm_delete": [item["lesson_id"]],
+            "note": "На Stepik ничего не отправлено. Удаление урока на Stepik не отменить: пропадут шаги, решения и "
+                    "комментарии учеников. Шаги сохранятся в snapshots/, локальный файл урока не удаляется. "
+                    "Передайте confirm_delete=[lesson_id] в stepik_apply_push, только если автор подтвердил удаление."}
+
+
+def _apply_lesson_plan(client, folder, plan_path, plan, confirm_delete):
+    course_id, lesson_id, section_id = plan["course_id"], plan["lesson_id"], plan["section_id"]
+    if plan["kind"] == "delete_lesson" and sorted(set(confirm_delete or [])) != [lesson_id]:
+        raise StepikError(f"DELETE_NOT_CONFIRMED: план удаляет урок {lesson_id}. Передайте confirm_delete=[{lesson_id}], "
+                          "только если автор подтвердил удаление", status=409)
+    if [uid for uid, _, _ in _section_units(client, section_id)] != plan["section_units"]:
+        raise StepikError("REMOTE_CHANGED: уроки модуля изменились на Stepik после плана. Постройте новый план",
+                          status=409)
+    lock = _inside(folder, ".stepik-cache.lock")
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        raise StepikError("Папка курса занята другой операцией (.stepik-cache.lock)") from None
+    try:
+        done = []
+        desired = [uid for uid in plan["section_units"] if uid != plan["unit_id"]]
+        if plan["kind"] == "move_lesson":
+            desired.insert(plan["new_position"] - 1, plan["unit_id"])
+            snapshot = None
+        else:
+            step_ids, sources = _remote_state(client, lesson_id)
+            if _fingerprint(step_ids, sources) != plan["remote_fingerprint"]:
+                raise StepikError("REMOTE_CHANGED: урок на Stepik изменился после плана. Постройте новый план",
+                                  status=409)
+            title = (client.by_ids("lessons", [lesson_id]) or [{}])[0].get("title")
+            snapshots = _inside(folder, "snapshots")
+            snapshots.mkdir(exist_ok=True)
+            snapshot = _inside(snapshots, f"{_now().strftime('%Y-%m-%d_%H%M%S')}-{plan['plan_id'][-6:]}"
+                                          f"-deleted-lesson-{lesson_id}.json")
+            _atomic_write(snapshot, json.dumps({"lesson_id": lesson_id, "title": title, "section_id": section_id,
+                                                "position": plan["section_units"].index(plan["unit_id"]) + 1,
+                                                "steps": step_ids, "step_sources": [sources[s] for s in step_ids]},
+                                               ensure_ascii=False, indent=2) + "\n")
+            client.delete(f"units/{plan['unit_id']}")
+            _log(folder, course_id=course_id, lesson_id=lesson_id, unit_id=plan["unit_id"], operation="delete_unit",
+                 result="ok")
+            client.delete(f"lessons/{lesson_id}")
+            _log(folder, course_id=course_id, lesson_id=lesson_id, operation="delete_lesson", result="ok")
+            done.append({"op": "delete_lesson", "lesson_id": lesson_id})
+        done += _fix_unit_order(client, folder, course_id, section_id, desired)
+        manifest = _refresh_structure(client, folder, course_id)
+        plan["applied_at"] = _now().isoformat()
+        plan["result"] = "ok"
+        _atomic_write(plan_path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n", replace=True)
+        key = next((key for key, item in manifest["lessons"].items() if item["lesson_id"] == lesson_id), None)
+        return {"status": "published", "kind": plan["kind"], "lesson_id": lesson_id, "done": done,
+                **({"lesson_position": key} if key else {}),
+                **({"snapshot": str(snapshot)} if snapshot else {}),
+                "note": ("Урок перемещён; номера уроков модуля в .course.json обновлены." if plan["kind"] == "move_lesson"
+                         else "Урок удалён со Stepik. Шаги сохранены в snapshot, локальный файл урока остался на месте.")}
+    except StepikError as exc:
+        _log(folder, course_id=course_id, lesson_id=lesson_id, operation=plan["kind"], result="error", error=str(exc))
         raise
     finally:
         lock.rmdir()

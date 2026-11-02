@@ -173,6 +173,8 @@ claude mcp add stepik --scope user -e STEPIK_CLIENT_ID=<client_id> -e STEPIK_CLI
 | `stepik_pull_course` | Скачать весь курс: все уроки со всеми шагами и описание курса; новые уроки добавляются в структуру | ✅ |
 | `stepik_plan_create_lesson` | План создания нового урока из локального черновика; применяется `stepik_apply_push` | ✅ |
 | `stepik_upgrade_lesson` | Перевести урок, скачанный старой версией, в текущий формат без потери правок | ✅ |
+| `stepik_plan_move_lesson` | План перестановки урока внутри модуля; применяется `stepik_apply_push` | ✅ |
+| `stepik_plan_delete_lesson` | План удаления урока; применяется `stepik_apply_push` с `confirm_delete` | ✅ |
 | `stepik_refresh_lesson` | Подтянуть изменения урока со Stepik, не затирая правки автора; конфликты — отдельным файлом | ✅ |
 | **Публикация** | | |
 | `stepik_plan_push` | План и diff публикации урока (текст, тесты, задачи на код), ничего не отправляет | ✅ |

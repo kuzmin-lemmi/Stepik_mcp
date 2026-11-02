@@ -239,11 +239,33 @@ def stepik_plan_create_lesson(course_id: int, draft_path: str, module_position: 
 
 
 @mcp.tool(
+    description="План перестановки урока внутри его модуля на Stepik. Ничего не отправляет. lesson_position — "
+    "текущий номер вида 6.2, new_position — новое место в модуле (число). Применяется stepik_apply_push после "
+    "подтверждения автора; номера соседних уроков сдвинутся, .course.json обновится, файлы уроков не переносятся.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_move_lesson(course_id: int, lesson_position: str, new_position: int) -> str:
+    return _run(lambda: json.dumps(publish.plan_move_lesson(CLIENT, course_id, lesson_position, new_position),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="План удаления урока со Stepik. Ничего не удаляет. Показывает число шагов и учеников. Применяется "
+    "stepik_apply_push с confirm_delete=[lesson_id], только если автор явно подтвердил удаление: на Stepik его не "
+    "отменить, пропадут решения и комментарии учеников. Шаги сохраняются в snapshots/, локальный файл не удаляется.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_delete_lesson(course_id: int, lesson_position: str) -> str:
+    return _run(lambda: json.dumps(publish.plan_delete_lesson(CLIENT, course_id, lesson_position),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
     description="Публикует на Stepik план из stepik_plan_push, stepik_rollback_lesson или "
-    "stepik_plan_create_lesson: загружает картинки, меняет, добавляет или восстанавливает шаги, создаёт урок. Вызывать только после того, как автор увидел diff и явно "
+    "stepik_plan_create_lesson, stepik_plan_move_lesson, stepik_plan_delete_lesson: загружает картинки, меняет, добавляет или восстанавливает шаги, создаёт, переименовывает, переставляет и удаляет уроки. Вызывать только после того, как автор увидел diff и явно "
     "подтвердил публикацию. confirm_steps — step_id из плана, которые уже решали ученики; передавайте их, только "
     "если автор согласился изменить именно эти шаги. confirm_delete — ровно те step_id, которые план удаляет; "
-    "передавайте их, только если автор подтвердил удаление. Перед записью проверяет, что файл и урок на Stepik не "
+    "передавайте их, только если автор подтвердил удаление (для удаления урока — [lesson_id]). Перед записью проверяет, что файл и урок на Stepik не "
     "менялись, и сохраняет снимок урока в snapshots/.",
     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
                                 open_world_hint=True),
