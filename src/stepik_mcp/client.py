@@ -120,6 +120,9 @@ class StepikClient:
         data = json.dumps(payload).encode()
         return self._request(f"{self.base_url}/api/{endpoint}", endpoint, "POST", data, "application/json")
 
+    def delete(self, endpoint):
+        return self._request(f"{self.base_url}/api/{endpoint}", endpoint, "DELETE")
+
     def put(self, endpoint, payload):
         data = json.dumps(payload).encode()
         return self._request(f"{self.base_url}/api/{endpoint}", endpoint, "PUT", data, "application/json")

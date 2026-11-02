@@ -33,7 +33,7 @@ class WorkspaceTests(unittest.TestCase):
             ],
             "step-sources": [
                 {"id": 12, "lesson": 1000, "block": {"name": "code", "text": "<p>SPECIAL_BODY</p>",
-                    "source": {"code": "checker as string"},
+                    "source": {"code": "checker as string", "templates_data": "::python3\nprint(input())"},
                     "options": {"code_templates": {"python3": "print(input())"}, "samples": [["1", "1"]]}}},
                 {"id": 11, "lesson": 1000, "block": {"name": "text", "text": "<p>Theory</p>"}},
                 {"id": 21, "lesson": 2000, "block": {"name": "text", "text": "<p>Other</p>"}},

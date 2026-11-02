@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 from .client import StepikError
 from .feedback import comments_for_steps, render_comments
-from .render import render_step
+from .steps import FORMAT, to_markdown
 
 
 COURSE_INSTRUCTIONS = """# Course Workspace
@@ -23,6 +23,8 @@ Fetch comments, statistics, submissions and reviews only when explicitly request
 Do not call stepik_lesson_bundle by default.
 Publish only via stepik_plan_push, then show the diff and call stepik_apply_push after explicit author approval.
 Preserve step IDs and metadata when editing. Never overwrite local work from Stepik.
+Task settings live in the ```yaml stepik block at the end of a step; edit values, keep the fence and type.
+.stepik/steps/*.json are Stepik originals used as the base for diffs; do not edit them.
 Course structure and lesson positions are a local snapshot, not a live synchronization.
 COURSE_MAP.md and .course.json are managed by the loader; do not edit them manually.
 New lessons may be written as Markdown in the appropriate module; do not invent Stepik IDs.
@@ -60,6 +62,38 @@ def _atomic_write(path, text, *, replace=False):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+# Служебные записи сервера (планы, журнал, снимки) не делают папку курса «чужой».
+SERVICE_ENTRIES = {".stepik", "logs", "snapshots"}
+
+# Статистика и служебные поля меняются без правки шага; в исходник они не попадают.
+VOLATILE_STEP_FIELDS = {
+    "actions", "correct_ratio", "discussion_proxy", "discussion_threads", "discussions_count",
+    "num_grades", "passed_by", "progress", "session", "subscriptions", "user_step_grade",
+    "user_step_vote", "viewed_by", "worth",
+}
+
+
+def save_step_sources(folder, sources):
+    """Исходники шагов Stepik в .stepik/steps/<id>.json — база для сравнения при публикации.
+
+    Вызывается вместе с записью нового файла урока, поэтому прежний исходник
+    того же шага заменяется: он относился к прежней локальной копии.
+    """
+    directory = _inside(folder, ".stepik/steps")
+    directory.mkdir(parents=True, exist_ok=True)
+    for source in sources:
+        clean = {key: value for key, value in source.items() if key not in VOLATILE_STEP_FIELDS}
+        text = json.dumps(clean, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        _atomic_write(_inside(directory, f"{int(source['id'])}.json"), text, replace=True)
+
+
+def load_step_source(folder, step_id):
+    path = _inside(folder, f".stepik/steps/{int(step_id)}.json")
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _objects(client, endpoint, ids):
@@ -173,7 +207,7 @@ def cache_lesson(client, course_id, lesson_position):
                 raise StepikError("Invalid .course.json; existing files were not overwritten") from exc
         else:
             # Do not adopt an unrelated folder or overwrite an orphaned managed index.
-            if any(path != lock for path in folder.iterdir()):
+            if any(path != lock and path.name not in SERVICE_ENTRIES for path in folder.iterdir()):
                 raise StepikError("Course folder is not empty but has no .course.json; manual inspection required")
             manifest = _course_structure(client, course_id)
         item = manifest["lessons"].get(lesson_position)
@@ -214,6 +248,7 @@ def cache_lesson(client, course_id, lesson_position):
             "course_id": course_id, "lesson_id": lid, "unit_id": item["unit_id"],
             "position": lesson_position, "title": lesson.get("title", ""),
             "source_url": source_url, "fetched_at": fetched_at, "status": "working_copy",
+            "format": FORMAT,
         }
         lines = ["---"] + [f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in metadata.items()]
         lines += ["---", "", f"# {lesson.get('title', '')}", ""]
@@ -222,8 +257,7 @@ def cache_lesson(client, course_id, lesson_position):
             if source.get("lesson") != lid or not isinstance(source.get("block"), dict):
                 raise StepikError(f"Invalid step-source {sid}; lesson not saved")
             kind = source["block"].get("name", "unknown")
-            # Keep ordinal headings and stable IDs, without the old duplicate heading.
-            body = render_step(source, raw=False, answers=True).partition("\n")[2].lstrip("\n")
+            body = to_markdown(source)
             lines += [f"<!-- step_id: {sid} -->", f"## \u0428\u0430\u0433 {number} | step_id: {sid} | {kind}", "", body, ""]
         text = "\n".join(lines)
 
@@ -232,6 +266,7 @@ def cache_lesson(client, course_id, lesson_position):
                     source_update_date=lesson.get("update_date"),
                     imported_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
         _save_index(folder, manifest)
+        save_step_sources(folder, [sources[sid] for sid in step_ids])
         _atomic_write(destination, text)
         _save_index(folder, manifest)
         return {
@@ -345,7 +380,7 @@ def cache_course_text_lessons(client, course_id):
             except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                 raise StepikError("Invalid .course.json; existing files were not overwritten") from exc
         else:
-            if any(path != lock for path in folder.iterdir()):
+            if any(path != lock and path.name not in SERVICE_ENTRIES for path in folder.iterdir()):
                 raise StepikError("Course folder is not empty but has no .course.json; manual inspection required")
             manifest = _course_structure(client, course_id)
 
@@ -390,7 +425,7 @@ def cache_course_text_lessons(client, course_id):
                 "course_id": course_id, "lesson_id": lesson_id, "unit_id": item["unit_id"],
                 "position": position, "title": lesson.get("title", ""),
                 "source_url": f"{client.base_url}/lesson/{lesson_id}",
-                "fetched_at": fetched_at, "status": "working_copy", "content_mode": "text_only",
+                "fetched_at": fetched_at, "status": "working_copy", "format": FORMAT, "content_mode": "text_only",
                 "source_step_count": len(step_ids), "text_step_count": len(text_sources),
             }
             lines = ["---"] + [f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in metadata.items()]
@@ -398,7 +433,7 @@ def cache_course_text_lessons(client, course_id):
                       "<!-- This local copy contains only theory text steps. Tasks are intentionally omitted. -->", ""]
             for number, source in enumerate(text_sources, 1):
                 step_id = source["id"]
-                body = render_step(source, raw=False, answers=False).partition("\n")[2].lstrip("\n")
+                body = to_markdown(source)
                 lines += [f"<!-- step_id: {step_id} -->", f"## Текстовый шаг {number} | step_id: {step_id}", "", body, ""]
             if not text_sources:
                 lines.append("_(В уроке нет текстовых теоретических шагов.)_")
@@ -407,6 +442,7 @@ def cache_course_text_lessons(client, course_id):
                         text_step_count=len(text_sources), content_mode="text_only", fetched_at=fetched_at,
                         imported_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest())
             _save_index(folder, manifest)
+            save_step_sources(folder, text_sources)
             _atomic_write(destination, text)
             _save_index(folder, manifest)
             saved.append({"position": position, "lesson_id": lesson_id, "path": str(destination),

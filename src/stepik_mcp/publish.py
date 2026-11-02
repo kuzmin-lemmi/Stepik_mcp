@@ -3,15 +3,29 @@
 Два шага: plan_push строит план и diff, ничего не отправляя; apply_push после
 подтверждения автора проверяет, что ни файл, ни урок на Stepik не изменились,
 сохраняет снимок, загружает картинки и меняет шаги. Запись разрешена только
-в курсы из ALLOWED_WRITE_COURSES (настройка сервера, не файлов курса).
+в курсы из ALLOWED_WRITE_COURSES (настройка сервера, не файлов курса); «*»
+разрешает любой курс, где аккаунт токена — автор или преподаватель.
 
-Публикуются только шаги типа text. Неизменённые шаги на Stepik не отправляются,
-поэтому конвертация HTML -> Markdown с потерями их не портит.
+Правка шага определяется сравнением с базой: исходником .stepik/steps/<id>.json,
+сохранённым при скачивании (или текущей версией Stepik, если базы нет). Если шаг
+изменён и локально, и на Stepik после скачивания, он не публикуется.
+
+Публикуются текстовые шаги и задания choice, string, number, matching, sorting,
+free-answer и code: правка YAML накладывается на исходник, задание проверяется
+до отправки, у задачи на код по желанию автора локально прогоняется решение.
+Если шаг уже решали ученики, применение требует явного согласия на этот шаг.
+Неизменённые шаги на Stepik не отправляются, поэтому конвертация HTML -> Markdown
+с потерями их не портит.
+
+Удаление шага — метка <!-- delete_step: N --> вместо <!-- step_id: N -->. Применение
+требует перечислить удаляемые шаги в confirm_delete; урок до удаления остаётся в снимке.
+
+plan_rollback строит такой же план возврата шагов к снимку из snapshots/: изменённые
+шаги восстанавливаются, удалённые создаются заново (с новым id).
 """
 
 import difflib
 import hashlib
-import html
 import json
 import os
 import re
@@ -20,9 +34,11 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
+from . import steps
 from .client import StepikError
-from .render import render_step
-from .workspace import _atomic_write, _inside
+from .solution import run_solution
+from .render import html_to_md, md_to_html, render_step
+from .workspace import _atomic_write, _inside, load_step_source, save_step_sources
 
 IMAGE_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -30,134 +46,9 @@ IMAGE_TYPES = {
 }
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
-STEP_MARKER = re.compile(r"^<!--\s*(?:step_id:\s*(\d+)|(new_step))\s*-->\s*$")
+STEP_MARKER = re.compile(r"^<!--\s*(?:step_id:\s*(\d+)|(new_step)|delete_step:\s*(\d+))\s*-->\s*$")
 IMAGE_MD = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 REMOTE_SRC = re.compile(r"^(?:https?:)?//|^/media/|^data:", re.IGNORECASE)
-
-
-# --------------------------------------------------------------------------
-# Markdown -> HTML
-# --------------------------------------------------------------------------
-
-def _inline(text):
-    """Строчная разметка: `код`, картинки, ссылки, **жирный**, *курсив*."""
-    out = []
-    for index, chunk in enumerate(re.split(r"`([^`]+)`", text)):
-        if index % 2:
-            out.append(f"<code>{html.escape(chunk, quote=False)}</code>")
-            continue
-        chunk = html.escape(chunk, quote=False)
-        chunk = re.sub(
-            r"!\[([^\]]*)\]\(([^)\s]+)\)",
-            lambda m: f'<img alt="{html.escape(m[1])}" src="{html.escape(m[2])}">', chunk,
-        )
-        chunk = re.sub(
-            r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)",
-            lambda m: f'<a href="{html.escape(m[2])}">{m[1]}</a>', chunk,
-        )
-        chunk = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<strong>\1</strong>", chunk)
-        chunk = re.sub(r"(?<![*\w])\*(?=\S)(.+?)(?<=\S)\*(?![*\w])", r"<em>\1</em>", chunk)
-        out.append(chunk)
-    return "".join(out)
-
-
-def _paragraph(lines):
-    parts = []
-    for number, line in enumerate(lines):
-        last = number == len(lines) - 1
-        hard_break = line.endswith("  ") and not last
-        parts.append(_inline(line.strip()) + ("<br>" if hard_break else ""))
-    return "<p>" + "\n".join(parts) + "</p>"
-
-
-LIST_ITEM = re.compile(r"^( *)([-*+]|\d+\.) +(.*)$")
-
-
-def _list(lines):
-    """Вложенность по отступу в 2 пробела, как пишет html_to_md."""
-    out = []
-    stack = []  # [(тег, глубина)]
-    for line in lines:
-        match = LIST_ITEM.match(line)
-        if not match:
-            # Продолжение предыдущего пункта.
-            out[-1] = out[-1][:-len("</li>")] + " " + _inline(line.strip()) + "</li>"
-            continue
-        depth = len(match[1]) // 2
-        tag = "ol" if match[2][0].isdigit() else "ul"
-        while stack and (stack[-1][1] > depth or (stack[-1][1] == depth and stack[-1][0] != tag)):
-            out.append(f"</{stack.pop()[0]}>")
-            if stack:
-                out.append("</li>")
-        if not stack or stack[-1][1] < depth:
-            if stack and out[-1].endswith("</li>"):
-                out[-1] = out[-1][:-len("</li>")]
-            out.append(f"<{tag}>")
-            stack.append((tag, depth))
-        out.append(f"<li>{_inline(match[3])}</li>")
-    while stack:
-        out.append(f"</{stack.pop()[0]}>")
-        if stack:
-            out.append("</li>")
-    return "".join(out)
-
-
-def md_to_html(markdown):
-    """Markdown урока -> HTML для Stepik.
-
-    Поддержаны заголовки, абзацы, списки, цитаты, блоки кода с языком,
-    картинки, ссылки, жирный, курсив и `код`. Блок, который начинается
-    с HTML-тега, передаётся как есть: так можно вставить таблицу или iframe.
-    """
-    lines = markdown.replace("\r\n", "\n").split("\n")
-    blocks = []
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
-        fence = re.match(r"^```\s*([\w+#-]*)\s*$", line)
-        if fence:
-            body = []
-            index += 1
-            while index < len(lines) and not lines[index].startswith("```"):
-                body.append(lines[index])
-                index += 1
-            index += 1
-            lang = f' class="language-{fence[1]}"' if fence[1] else ""
-            blocks.append(f"<pre><code{lang}>{html.escape(chr(10).join(body), quote=False)}</code></pre>")
-            continue
-        heading = re.match(r"^(#{1,6}) +(.*)$", line)
-        if heading:
-            level = len(heading[1])
-            blocks.append(f"<h{level}>{_inline(heading[2].strip())}</h{level}>")
-            index += 1
-            continue
-        group = []
-        if line.startswith(">"):
-            while index < len(lines) and lines[index].startswith(">"):
-                group.append(lines[index][1:].strip())
-                index += 1
-            inner = [item for item in group if item]
-            blocks.append("<blockquote>" + (_paragraph(inner) if inner else "") + "</blockquote>")
-            continue
-        if LIST_ITEM.match(line):
-            while index < len(lines) and lines[index].strip() and not lines[index].startswith("```"):
-                group.append(lines[index])
-                index += 1
-            blocks.append(_list(group))
-            continue
-        while index < len(lines) and lines[index].strip():
-            if group and (lines[index].startswith(("```", "#", ">")) or LIST_ITEM.match(lines[index])):
-                break
-            group.append(lines[index])
-            index += 1
-        if re.match(r"^<[a-zA-Z!]", group[0].lstrip()):
-            blocks.append("\n".join(group))
-        else:
-            blocks.append(_paragraph(group))
-    return "\n".join(blocks)
 
 
 class _Features(HTMLParser):
@@ -201,17 +92,21 @@ def parse_lesson(text):
     """Делит урок на шаги по меткам <!-- step_id: N --> и <!-- new_step -->.
 
     Заголовок шага (первая строка «## ...» после метки) в текст шага не входит.
+    Метка стоит в начале строки. В старом формате ограды кода бывают незакрыты
+    (ошибка прежнего загрузчика), поэтому там метки ищутся без учёта оград.
     """
-    lines = text.replace("\r\n", "\n").split("\n")
+    text = text.replace("\r\n", "\n")
+    track_fences = file_format(text) >= 2
     entries = []
     current = None
-    in_fence = False
-    for line in lines:
-        if line.startswith("```"):
-            in_fence = not in_fence
-        match = None if in_fence else STEP_MARKER.match(line.strip())
+    fence = None
+    for line in text.split("\n"):
+        fence = _fence_after(fence, line) if track_fences else None
+        match = None if fence else STEP_MARKER.match(line.rstrip())
         if match:
-            current = {"step_id": int(match[1]) if match[1] else None, "lines": [], "heading": None}
+            number = match[1] or match[3]
+            current = {"step_id": int(number) if number else None, "delete": bool(match[3]),
+                       "lines": [], "heading": None}
             entries.append(current)
             continue
         if current is None:
@@ -227,31 +122,92 @@ def parse_lesson(text):
     return entries
 
 
-def _remote_body(source):
-    """Тот же Markdown, что пишет загрузчик для этого шага."""
-    return render_step(source, raw=False, answers=True).partition("\n")[2].strip()
+def _fence_after(fence, line):
+    """Открытая ограда кода после строки: закрывается только такой же или длиннее."""
+    run = re.match(r"^\s*(`{3,})(.*)$", line)
+    if fence is None:
+        return run[1] if run else None
+    if run and len(run[1]) >= len(fence) and not run[2].strip():
+        return None
+    return fence
+
+
+def file_format(text):
+    """Версия формата урока из frontmatter: 2 — с YAML-блоками; без поля — старый формат."""
+    value = _frontmatter_value(text, "format")
+    return value if isinstance(value, int) else 1
+
+
+def _frontmatter_value(text, key):
+    head = text.split("\n---", 1)[0] if text.startswith("---") else ""
+    match = re.search(rf"(?m)^{re.escape(key)}:\s*(.+?)\s*$", head)
+    if not match:
+        return None
+    try:
+        return json.loads(match[1])
+    except ValueError:
+        return match[1]
+
+
+def _changed_after(update_date, fetched_at):
+    """True, если шаг на Stepik менялся позже скачивания файла (или это нельзя исключить)."""
+    try:
+        updated = datetime.fromisoformat(str(update_date).replace("Z", "+00:00"))
+        fetched = datetime.fromisoformat(str(fetched_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return updated > fetched
+
+
+def expected_body(source, fmt):
+    """Тело шага в файле, который скачан из этого исходника и не правился."""
+    if fmt >= 2:
+        return steps.to_markdown(source).strip()
+    # Старые файлы: прежний рендер и прежний разбор списков.
+    return render_step(source, raw=False, answers=True, legacy=True).partition("\n")[2].strip()
 
 
 # --------------------------------------------------------------------------
 # Окружение
 # --------------------------------------------------------------------------
 
+ANY_COURSE = "*"
+
+
 def allowed_write_courses():
+    """ID курсов из ALLOWED_WRITE_COURSES; «*» означает любой свой курс."""
     raw = os.environ.get("ALLOWED_WRITE_COURSES", "")
     allowed = set()
     for part in re.split(r"[,\s]+", raw.strip()):
-        if part:
+        if part == ANY_COURSE:
+            allowed.add(ANY_COURSE)
+        elif part:
             if not part.isdigit():
-                raise StepikError("ALLOWED_WRITE_COURSES: ожидаются ID курсов через запятую")
+                raise StepikError("ALLOWED_WRITE_COURSES: ожидаются ID курсов через запятую или «*»")
             allowed.add(int(part))
     return allowed
 
 
-def _check_allowed(course_id):
-    if course_id not in allowed_write_courses():
+def _check_allowed(client, course_id):
+    allowed = allowed_write_courses()
+    if course_id in allowed:
+        return
+    if ANY_COURSE not in allowed:
         raise StepikError(
             f"WRITE_NOT_ALLOWED: курса {course_id} нет в ALLOWED_WRITE_COURSES. "
             "Список задаётся в настройках MCP-сервера.", status=403,
+        )
+    # «*» не открывает чужие курсы: аккаунт должен быть автором или преподавателем.
+    me = ((client.get("stepics/1").get("users") or [{}])[0]).get("id")
+    courses = client.by_ids("courses", [course_id])
+    staff = set()
+    for course in courses:
+        staff.update(course.get("authors") or [])
+        staff.update(course.get("instructors") or [])
+        staff.add(course.get("owner"))
+    if me is None or me not in staff:
+        raise StepikError(
+            f"WRITE_NOT_ALLOWED: аккаунт не автор и не преподаватель курса {course_id}", status=403,
         )
 
 
@@ -355,12 +311,15 @@ def _with_urls(body, images, uploaded):
 # --------------------------------------------------------------------------
 
 def plan_push(client, course_id, lesson_position):
-    _check_allowed(course_id)
+    _check_allowed(client, course_id)
     folder = _course_folder(course_id)
     item, lesson_path = _manifest_item(folder, course_id, lesson_position)
     lesson_id = item["lesson_id"]
     data = lesson_path.read_bytes()
-    entries = parse_lesson(data.decode("utf-8"))
+    text = data.decode("utf-8")
+    fmt = file_format(text)
+    fetched_at = _frontmatter_value(text, "fetched_at")
+    entries = parse_lesson(text)
     if not entries:
         raise StepikError("В файле нет меток шагов <!-- step_id: N --> или <!-- new_step -->", status=400)
 
@@ -384,63 +343,233 @@ def plan_push(client, course_id, lesson_position):
         if sid is None:
             if not entry["body"]:
                 continue
+            kind = "text"
+            extra = {}
+            if steps.split_body(entry["body"])[1] is not None:
+                try:
+                    block = steps.new_block(_with_urls(entry["body"], image_shas, uploaded))
+                    steps.validate(block)
+                    kind = block["name"]
+                    extra = _check_solution(folder, lesson_path, block, entry["body"])
+                except StepikError as exc:
+                    skipped.append({"step": f"новый после позиции {last_anchor}", "reason": str(exc)})
+                    continue
             position = last_anchor + created + 1
             created += 1
-            operations.append({"op": "create", "position": position, "markdown": entry["body"],
+            operations.append({"op": "create", "position": position, "kind": kind, "markdown": entry["body"],
                                "images": image_shas})
-            summary.append({"step": f"новый, позиция {position}", "status": "NEW"})
-            diff_parts.append(f"=== Новый шаг (позиция {position}) ===\n{entry['body']}\n")
+            summary.append({"step": f"новый, позиция {position}", "status": "NEW", "type": kind, **extra})
+            diff_parts.append(f"=== Новый шаг {kind} (позиция {position}) ===\n{entry['body']}\n")
             continue
         if sid not in sources:
-            raise StepikError(f"Шага {sid} нет в уроке {lesson_id} на Stepik. Удаление и перенос шагов не поддерживаются",
-                              status=409)
+            if entry["delete"]:
+                skipped.append({"step_id": sid, "reason": "шага уже нет на Stepik"})
+                continue
+            raise StepikError(f"Шага {sid} нет в уроке {lesson_id} на Stepik. Перенос шагов не поддерживается; "
+                              "чтобы удалить шаг, замените его метку на <!-- delete_step: N -->", status=409)
         if position_of[sid] <= last_anchor:
             raise StepikError("Порядок шагов в файле отличается от Stepik. Перемещение шагов не поддерживается",
                               status=409)
         last_anchor = position_of[sid]
+        if entry["delete"]:
+            source = sources[sid]
+            kind = source["block"].get("name")
+            learners = source.get("passed_by") or 0
+            operations.append({"op": "delete", "step_id": sid, "kind": kind, "confirm": learners > 0})
+            summary.append({"step": f"step_id {sid}, позиция {position_of[sid]}", "status": "DELETE", "type": kind,
+                            **({"решили учеников": learners, "нужно согласие": True} if learners else {})})
+            diff_parts.append(f"=== Удаление шага {position_of[sid]} (step_id {sid}, {kind}) ===\n"
+                              + "\n".join("- " + line for line in steps.to_markdown(source).splitlines()) + "\n")
+            continue
         source = sources[sid]
-        remote_md = _remote_body(source)
+        base = load_step_source(folder, sid)
+        base_note = {}
+        if base is None:
+            base = source
+            base_note = {"база": "исходника при скачивании нет, сравнение с текущей версией Stepik"}
+        remote_md = expected_body(base, fmt)
         local_md = _with_urls(entry["body"], image_shas, uploaded)
         if local_md == remote_md:
             continue
+        if fmt >= 2:
+            # Текст может отличаться без изменения сути: например, YAML нового задания
+            # короче полного (без show и checker). Сравниваем собранные блоки.
+            try:
+                if steps.build_block(base["block"], local_md) == base["block"]:
+                    continue
+            except StepikError:
+                pass  # ошибку в YAML покажет сборка ниже
         kind = source["block"].get("name")
-        if kind != "text":
-            skipped.append({"step_id": sid, "position": position_of[sid], "type": kind,
-                            "reason": "изменён, но публикуются только текстовые шаги"})
+        where = {"step_id": sid, "position": position_of[sid], "type": kind}
+        if base_note and _changed_after(source.get("update_date"), fetched_at):
+            # Без исходника отличие может быть правкой на Stepik, а не локальной: не затираем её.
+            skipped.append({**where, "reason": f"шаг изменён на Stepik ({source.get('update_date')}) после скачивания "
+                                               "файла, а исходника на момент скачивания нет; скачайте урок заново "
+                                               "и перенесите правку"})
             continue
-        operations.append({"op": "update", "step_id": sid, "markdown": entry["body"], "images": image_shas})
-        warnings = _lossy_features(source["block"].get("text"))
-        summary.append({"step": f"step_id {sid}, позиция {position_of[sid]}", "status": "MODIFIED",
-                        **({"будет потеряно": warnings} if warnings else {})})
-        diff = difflib.unified_diff(remote_md.splitlines(), local_md.splitlines(),
-                                    f"Stepik, шаг {position_of[sid]}", f"локально, шаг {position_of[sid]}",
+        if base["block"] != source["block"]:
+            skipped.append({**where, "reason": "изменён и локально, и на Stepik после скачивания; "
+                                               "перенесите правку в свежую копию урока"})
+            continue
+        if kind != "text" and kind not in steps.PUBLISHABLE:
+            skipped.append({**where, "reason": f"шаги типа {kind} пока не публикуются"})
+            continue
+        if kind != "text" and fmt < 2:
+            skipped.append({**where, "reason": "файл скачан до появления YAML-блоков; скачайте урок заново, "
+                                               "чтобы править задание"})
+            continue
+        if fmt < 2 and html_to_md(source["block"].get("text"), legacy=True) != html_to_md(source["block"].get("text")):
+            skipped.append({**where, "reason": "файл скачан старой версией, и списки этого шага в нём искажены; "
+                                               "скачайте урок заново и перенесите правку"})
+            continue
+        try:
+            block = steps.build_block(source["block"], local_md)
+            if kind != "text":
+                steps.validate(block)
+            extra = _check_solution(folder, lesson_path, block, entry["body"]) if kind == "code" else {}
+        except StepikError as exc:
+            skipped.append({**where, "reason": str(exc)})
+            continue
+        fields = steps.changed_paths(source["block"], block)
+        learners = source.get("passed_by") or 0
+        confirm = kind != "text" and learners > 0 and any(not path.startswith("text") for path in fields)
+        operations.append({"op": "update", "step_id": sid, "kind": kind, "markdown": entry["body"],
+                           "images": image_shas, "confirm": confirm})
+        warnings = _lossy_features(source["block"].get("text")) if "text" in fields else []
+        summary.append({"step": f"step_id {sid}, позиция {position_of[sid]}", "status": "MODIFIED", "type": kind,
+                        **({"поля": fields} if kind != "text" else {}),
+                        **({"будет потеряно": warnings} if warnings else {}),
+                        **({"решили учеников": learners, "нужно согласие": True} if confirm else {}),
+                        **extra, **base_note})
+        # У задания сравниваем полные настройки до и после: поля, не выписанные
+        # в YAML, остаются как на Stepik и в diff не должны выглядеть удалёнными.
+        before, after = remote_md, local_md
+        if kind != "text":
+            before, after = steps.to_markdown(source), steps.to_markdown({"block": block})
+        diff = difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                    f"Stepik, шаг {position_of[sid]}", f"будет на Stepik, шаг {position_of[sid]}",
                                     lineterm="")
         diff_parts.append("\n".join(diff) + "\n")
 
     if not operations:
         return {"status": "nothing_to_push", "lesson_id": lesson_id, "skipped": skipped,
-                "note": "Текстовые шаги совпадают со Stepik. Ничего не отправлено."}
+                "note": "Шаги совпадают со Stepik. Ничего не отправлено."}
+    return _save_plan(folder, course_id, lesson_position, lesson_id, lesson_path, _sha(data),
+                      step_ids, sources, images, operations, summary, skipped, diff_parts)
 
+
+def _check_solution(folder, lesson_path, block, body):
+    """Прогон эталонного решения, если автор указал его в YAML (solution: путь)."""
+    solution = steps.local_settings(body).get("solution")
+    if block.get("name") != "code" or solution is None:
+        return {}
+    report = run_solution(folder, lesson_path, block, solution)
+    if report["status"] == "failed":
+        raise StepikError(f"Эталонное решение не прошло тесты ({report['passed']}/{report['total']}): "
+                          + json.dumps(report["failures"], ensure_ascii=False), status=400)
+    return {"решение": report}
+
+
+def _save_plan(folder, course_id, lesson_position, lesson_id, lesson_path, file_sha, step_ids, sources,
+               images, operations, summary, skipped, diff_parts, kind="push"):
     plan_id = _now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
     plans = _inside(folder, ".stepik/plans")
     plans.mkdir(parents=True, exist_ok=True)
     plan = {
-        "version": 1, "plan_id": plan_id, "created_at": _now().isoformat(),
+        "version": 1, "plan_id": plan_id, "kind": kind, "created_at": _now().isoformat(),
         "course_id": course_id, "lesson_position": lesson_position, "lesson_id": lesson_id,
-        "lesson_path": lesson_path.relative_to(folder).as_posix(), "file_sha256": _sha(data),
+        "lesson_path": lesson_path.relative_to(folder).as_posix(), "file_sha256": file_sha,
         "remote_fingerprint": _fingerprint(step_ids, sources),
         "images": images, "operations": operations,
     }
     diff_path = _inside(plans, f"{plan_id}.diff")
     _atomic_write(diff_path, "\n".join(diff_parts))
     _atomic_write(_inside(plans, f"{plan_id}.json"), json.dumps(plan, ensure_ascii=False, indent=2) + "\n")
+    confirm = [op["step_id"] for op in operations if op.get("confirm")]
+    deletes = [op["step_id"] for op in operations if op["op"] == "delete"]
     return {
         "status": "planned", "plan_id": plan_id, "lesson_id": lesson_id, "course_id": course_id,
         "changes": summary, "images_to_upload": sorted(images.values()), "skipped": skipped,
         "diff_path": str(diff_path),
+        **({"confirm_steps": confirm} if confirm else {}),
+        **({"confirm_delete": deletes} if deletes else {}),
         "note": "На Stepik ничего не отправлено. Покажите автору diff и вызывайте stepik_apply_push "
-                "только после его явного подтверждения.",
+                "только после его явного подтверждения."
+                + (" Шаги из confirm_steps уже решали ученики: передайте их в confirm_steps, только если "
+                   "автор согласился изменить именно их." if confirm else "")
+                + (" Удаление нельзя отменить на Stepik (откат создаст шаг заново, но без комментариев и "
+                   "решений): передайте confirm_delete, только если автор подтвердил удаление этих шагов."
+                   if deletes else ""),
     }
+
+
+# --------------------------------------------------------------------------
+# Откат к снимку
+# --------------------------------------------------------------------------
+
+SNAPSHOT_NAME = re.compile(r"[\w.-]+-lesson-(\d+)\.json")
+
+
+def plan_rollback(client, course_id, lesson_position, snapshot="latest"):
+    """План возврата шагов урока к снимку. Ничего не отправляет."""
+    _check_allowed(client, course_id)
+    folder = _course_folder(course_id)
+    item, lesson_path = _manifest_item(folder, course_id, lesson_position)
+    lesson_id = item["lesson_id"]
+    directory = _inside(folder, "snapshots")
+    if snapshot == "latest":
+        names = sorted(path.name for path in directory.glob(f"*-lesson-{lesson_id}.json")) if directory.is_dir() else []
+        if not names:
+            raise StepikError(f"Снимков урока {lesson_id} нет", status=404)
+        snapshot = names[-1]
+    match = SNAPSHOT_NAME.fullmatch(snapshot or "")
+    if not match or int(match[1]) != lesson_id:
+        raise StepikError("snapshot: имя файла из snapshots/ этого урока или latest", status=400)
+    path = _inside(directory, snapshot)
+    if not path.is_file():
+        raise StepikError(f"Снимок не найден: {snapshot}", status=404)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+
+    _verify_lesson_in_course(client, lesson_id, course_id)
+    step_ids, sources = _remote_state(client, lesson_id)
+    position_of = {sid: number for number, sid in enumerate(step_ids, 1)}
+    operations, summary, skipped, diff_parts = [], [], [], []
+    for number, old in enumerate(saved.get("step_sources") or [], 1):
+        sid = old["id"]
+        if sid not in sources:
+            kind = old["block"].get("name")
+            operations.append({"op": "recreate", "step_id": sid, "kind": kind, "position": number,
+                               "block": old["block"], "cost": old.get("cost", 0)})
+            summary.append({"step": f"удалённый step_id {sid}, позиция {number}", "status": "RECREATE", "type": kind,
+                            "note": "шаг вернётся с новым id; комментарии и решения учеников не восстанавливаются"})
+            diff_parts.append(f"=== Шаг {number} будет создан заново (был step_id {sid}) ===\n"
+                              + steps.to_markdown(old) + "\n")
+            continue
+        current = sources[sid]
+        if current["block"] == old["block"]:
+            continue
+        kind = current["block"].get("name")
+        fields = steps.changed_paths(current["block"], old["block"])
+        learners = current.get("passed_by") or 0
+        confirm = kind != "text" and learners > 0 and any(not field.startswith("text") for field in fields)
+        operations.append({"op": "restore", "step_id": sid, "kind": kind, "block": old["block"], "confirm": confirm})
+        summary.append({"step": f"step_id {sid}, позиция {position_of[sid]}", "status": "RESTORE", "type": kind,
+                        "поля": fields, **({"решили учеников": learners, "нужно согласие": True} if confirm else {})})
+        diff = difflib.unified_diff(steps.to_markdown(current).splitlines(), steps.to_markdown(old).splitlines(),
+                                    f"Stepik сейчас, шаг {position_of[sid]}", f"снимок {snapshot}", lineterm="")
+        diff_parts.append("\n".join(diff) + "\n")
+    newer = [sid for sid in step_ids if sid not in {old["id"] for old in saved.get("step_sources") or []}]
+    if newer:
+        skipped.append({"step_ids": newer, "reason": "созданы после снимка; откат их не удаляет"})
+    if not operations:
+        return {"status": "nothing_to_restore", "lesson_id": lesson_id, "snapshot": snapshot, "skipped": skipped,
+                "note": "Шаги на Stepik совпадают со снимком. Ничего не отправлено."}
+    result = _save_plan(folder, course_id, lesson_position, lesson_id, lesson_path, None, step_ids, sources,
+                        {}, operations, summary, skipped, diff_parts, kind="rollback")
+    result["snapshot"] = snapshot
+    result["note"] += (" Локальный файл урока откат не меняет: если в нём осталась откатываемая правка, "
+                       "следующий stepik_plan_push предложит её снова.")
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -462,28 +591,61 @@ def _attachment_url(client, response):
     return client.base_url + url if url.startswith("/") else url
 
 
+def _block_hash(block):
+    return _sha(json.dumps(block, sort_keys=True, ensure_ascii=False).encode())
+
+
 def _record_new_ids(folder, lesson_path, created_ids):
-    """Заменяет метки <!-- new_step --> на настоящие step_id, по порядку."""
-    lines = lesson_path.read_text(encoding="utf-8").split("\n")
+    """Заменяет метки <!-- new_step --> на настоящие step_id, по порядку. created_ids: [(id, тип)]."""
+    text = lesson_path.read_text(encoding="utf-8")
+    track_fences = file_format(text) >= 2
+    lines = text.split("\n")
     pending = list(created_ids)
-    in_fence = False
+    fence = None
     for number, line in enumerate(lines):
-        if line.startswith("```"):
-            in_fence = not in_fence
-        if not pending or in_fence:
+        fence = _fence_after(fence, line) if track_fences else None
+        if not pending or fence:
             continue
-        match = STEP_MARKER.match(line.strip())
+        match = STEP_MARKER.match(line.rstrip())
         if match and match[2]:
-            sid = pending.pop(0)
+            sid, kind = pending.pop(0)
             lines[number] = f"<!-- step_id: {sid} -->"
             following = number + 1
             if following < len(lines) and lines[following].startswith("## "):
-                lines[following] = f"## Шаг | step_id: {sid} | text"
+                lines[following] = f"## Шаг | step_id: {sid} | {kind}"
     _atomic_write(lesson_path, "\n".join(lines), replace=True)
 
 
-def apply_push(client, course_id, plan_id):
-    _check_allowed(course_id)
+def _refresh_bases(client, folder, done):
+    """Опубликованная версия шагов становится новой базой для следующих правок."""
+    touched = [operation["step_id"] for operation in done
+               if operation.get("step_id") and operation["op"] != "delete"]
+    if touched:
+        save_step_sources(folder, client.by_ids("step-sources", touched))
+    for operation in done:
+        if operation["op"] == "delete":
+            _inside(folder, f".stepik/steps/{operation['step_id']}.json").unlink(missing_ok=True)
+
+
+def _remove_deleted_steps(folder, lesson_path, deleted_ids):
+    """Убирает из файла урока разделы шагов с меткой <!-- delete_step: N -->, удалённых на Stepik."""
+    text = lesson_path.read_text(encoding="utf-8")
+    track_fences = file_format(text) >= 2
+    kept = []
+    dropping = False
+    fence = None
+    for line in text.split("\n"):
+        fence = _fence_after(fence, line) if track_fences else None
+        match = None if fence else STEP_MARKER.match(line.rstrip())
+        if match:
+            dropping = bool(match[3]) and int(match[3]) in deleted_ids
+        if not dropping:
+            kept.append(line)
+    _atomic_write(lesson_path, "\n".join(kept), replace=True)
+
+
+def apply_push(client, course_id, plan_id, confirm_steps=None, confirm_delete=None):
+    _check_allowed(client, course_id)
     if not re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", plan_id or ""):
         raise StepikError("Некорректный plan_id", status=400)
     folder = _course_folder(course_id)
@@ -495,6 +657,15 @@ def apply_push(client, course_id, plan_id):
         raise StepikError("План уже применён. Для новых правок постройте новый план", status=409)
     if plan["course_id"] != course_id:
         raise StepikError("План относится к другому курсу", status=400)
+    needed = {op["step_id"] for op in plan["operations"] if op.get("confirm")}
+    missing = sorted(needed - set(confirm_steps or []))
+    if missing:
+        raise StepikError(f"LEARNER_IMPACT: шаги {missing} уже решали ученики. Передайте их в confirm_steps, "
+                          "только если автор явно согласился изменить именно эти шаги", status=409)
+    deletes = sorted(op["step_id"] for op in plan["operations"] if op["op"] == "delete")
+    if deletes != sorted(set(confirm_delete or [])):
+        raise StepikError(f"DELETE_NOT_CONFIRMED: план удаляет шаги {deletes}. Передайте ровно их в confirm_delete, "
+                          "только если автор подтвердил удаление", status=409)
 
     lock = _inside(folder, ".stepik-push.lock")
     try:
@@ -503,7 +674,7 @@ def apply_push(client, course_id, plan_id):
         raise StepikError("Публикация уже идёт. Если процесс упал, проверьте .stepik-push.lock") from None
     try:
         lesson_path = _inside(folder, plan["lesson_path"])
-        if _sha(lesson_path.read_bytes()) != plan["file_sha256"]:
+        if plan["file_sha256"] is not None and _sha(lesson_path.read_bytes()) != plan["file_sha256"]:
             raise StepikError("LOCAL_CHANGED: файл урока изменился после плана. Постройте новый план", status=409)
         lesson_id = plan["lesson_id"]
         _verify_lesson_in_course(client, lesson_id, course_id)
@@ -515,14 +686,15 @@ def apply_push(client, course_id, plan_id):
         stamp = _now().strftime("%Y-%m-%d_%H%M%S")
         snapshots = _inside(folder, "snapshots")
         snapshots.mkdir(exist_ok=True)
-        snapshot = _inside(snapshots, f"{stamp}-lesson-{lesson_id}.json")
+        # Часть plan_id в имени: два применения в одну секунду не столкнутся.
+        snapshot = _inside(snapshots, f"{stamp}-{plan_id[-6:]}-lesson-{lesson_id}.json")
         _atomic_write(snapshot, json.dumps({"lesson_id": lesson_id, "steps": step_ids,
                                             "step_sources": [sources[sid] for sid in step_ids]},
                                            ensure_ascii=False, indent=2) + "\n")
 
         images_path = _inside(folder, ".stepik/images.json")
         uploaded = _load_json(images_path, {})
-        done, created_ids = [], []
+        done, created_ids, deleted_ids = [], [], []
         current = None
         try:
             for sha, relative in plan["images"].items():
@@ -539,27 +711,53 @@ def apply_push(client, course_id, plan_id):
                      path=relative, new_hash=sha, result="ok")
                 done.append(current)
 
-            for operation in plan["operations"]:
-                text = md_to_html(_with_urls(operation["markdown"], operation["images"], uploaded))
-                new_hash = _sha(text.encode())
-                if operation["op"] == "update":
+            # Удаления в конце: позиции новых шагов в плане посчитаны при ещё не удалённых шагах.
+            ordered = ([op for op in plan["operations"] if op["op"] != "delete"]
+                       + [op for op in plan["operations"] if op["op"] == "delete"])
+            for operation in ordered:
+                markdown = _with_urls(operation.get("markdown", ""), operation.get("images", []), uploaded)
+                if operation["op"] == "delete":
                     sid = operation["step_id"]
-                    current = {"op": "update", "step_id": sid}
+                    current = {"op": "delete", "step_id": sid}
+                    client.delete(f"step-sources/{sid}")
+                    deleted_ids.append(sid)
+                    old_hash, new_hash = _block_hash(sources[sid]["block"]), None
+                elif operation["op"] in ("update", "restore"):
+                    sid = operation["step_id"]
+                    current = {"op": operation["op"], "step_id": sid}
                     source = dict(sources[sid])
-                    source["block"] = {**source["block"], "text": text}
+                    if operation["op"] == "restore":
+                        source["block"] = operation["block"]
+                    else:
+                        source["block"] = steps.build_block(source["block"], markdown)
+                        if source["block"].get("name") != "text":
+                            steps.validate(source["block"])
+                    new_hash = _block_hash(source["block"])
                     client.put(f"step-sources/{sid}", {"stepSource": source})
-                    old_hash = _sha((sources[sid]["block"].get("text") or "").encode())
+                    old_hash = _block_hash(sources[sid]["block"])
                 else:
-                    current = {"op": "create", "position": operation["position"]}
-                    response = client.post("step-sources", {"stepSource": {
-                        "lesson": lesson_id, "position": operation["position"],
-                        "block": {"name": "text", "text": text},
-                    }})
+                    kind = operation.get("kind", "text")
+                    if operation["op"] == "recreate":
+                        block = operation["block"]
+                    elif kind == "text":
+                        block = {"name": "text", "text": md_to_html(markdown)}
+                    else:
+                        block = steps.new_block(markdown)
+                        steps.validate(block)
+                    new_hash = _block_hash(block)
+                    current = {"op": operation["op"], "position": operation["position"], "type": kind}
+                    step = {"lesson": lesson_id, "position": operation["position"], "block": block}
+                    if operation["op"] == "recreate":
+                        step["cost"] = operation.get("cost", 0)
+                    elif kind != "text":
+                        step["cost"] = 1  # как у задания, созданного в редакторе Stepik
+                    response = client.post("step-sources", {"stepSource": step})
                     rows = response.get("step-sources") or []
                     if not rows or not rows[0].get("id"):
                         raise StepikError("Stepik не вернул id созданного шага")
                     sid = rows[0]["id"]
-                    created_ids.append(sid)
+                    if operation["op"] == "create":
+                        created_ids.append((sid, kind))
                     current["step_id"] = sid
                     old_hash = None
                 _log(folder, course_id=course_id, lesson_id=lesson_id, step_id=sid, operation=operation["op"],
@@ -570,6 +768,12 @@ def apply_push(client, course_id, plan_id):
                  result="error", error=str(exc))
             if created_ids:
                 _record_new_ids(folder, lesson_path, created_ids)
+            if deleted_ids:
+                _remove_deleted_steps(folder, lesson_path, deleted_ids)
+            try:
+                _refresh_bases(client, folder, done)
+            except StepikError:
+                pass  # Не заслоняем исходную ошибку; база обновится при следующем скачивании.
             plan["applied_at"] = _now().isoformat()
             plan["result"] = "partial"
             _atomic_write(plan_path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n", replace=True)
@@ -581,14 +785,20 @@ def apply_push(client, course_id, plan_id):
 
         if created_ids:
             _record_new_ids(folder, lesson_path, created_ids)
+        if deleted_ids:
+            _remove_deleted_steps(folder, lesson_path, deleted_ids)
+        _refresh_bases(client, folder, done)
         plan["applied_at"] = _now().isoformat()
         plan["result"] = "ok"
         _atomic_write(plan_path, json.dumps(plan, ensure_ascii=False, indent=2) + "\n", replace=True)
         return {
             "status": "published", "plan_id": plan_id, "lesson_id": lesson_id, "done": done,
             "snapshot": str(snapshot), "source_url": f"{client.base_url}/lesson/{lesson_id}",
-            "note": "Изменения опубликованы. Новые step_id записаны в файл урока." if created_ids
-                    else "Изменения опубликованы.",
+            "note": "Изменения опубликованы."
+                    + (" Новые step_id записаны в файл урока." if created_ids else "")
+                    + (" Удалённые шаги убраны из файла урока; их содержимое осталось в snapshot." if deleted_ids else "")
+                    + (" Восстановленные шаги получили новые id: скачайте урок заново." if any(
+                        op["op"] == "recreate" for op in plan["operations"]) else ""),
         }
     finally:
         lock.rmdir()

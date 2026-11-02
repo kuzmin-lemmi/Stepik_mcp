@@ -5,7 +5,7 @@
 
 Инструменты stepik_cache_* пишут только в локальный workspace.
 На Stepik пишут только stepik_plan_push/stepik_apply_push (модуль publish)
-и только в курсы из ALLOWED_WRITE_COURSES.
+и только в курсы из ALLOWED_WRITE_COURSES («*» — любой свой курс).
 """
 
 import os
@@ -14,7 +14,7 @@ import json
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import publish
+from . import moderation, publish, roundtrip
 from . import workspace as sw
 from .analytics import render_lesson_bundle, render_lesson_stats, render_step_stats
 from .client import StepikClient, StepikError
@@ -140,11 +140,16 @@ def stepik_cache_course_text_lessons(course_id: int) -> str:
 
 
 @mcp.tool(
-    description="План публикации текстовых шагов и картинок из локального урока на Stepik. Ничего не отправляет. "
-    "Сравнивает шаги файла (метки <!-- step_id: N -->) с уроком на Stepik, новые шаги помечаются строкой "
-    "<!-- new_step -->. Картинки — локальные файлы в папке курса: ![подпись](images/схема.png). "
-    "Возвращает plan_id, список изменений и путь к diff. Покажите diff автору до stepik_apply_push. "
-    "Работает только для курсов из ALLOWED_WRITE_COURSES.",
+    description="План публикации урока из локального файла на Stepik. Ничего не отправляет. "
+    "Сравнивает шаги файла (метки <!-- step_id: N -->) с исходниками на момент скачивания и с уроком на Stepik. "
+    "Публикует текстовые шаги и задания choice, string, number, matching, sorting, free-answer, code: настройки "
+    "задания правятся в блоке ```yaml stepik в конце шага. Новый шаг — строка <!-- new_step -->, для задания с "
+    "YAML-блоком. Удалить шаг — заменить его метку на <!-- delete_step: N -->. Задания проверяются до отправки; у задачи на код ключ solution: путь/к/решению.py запускает "
+    "решение локально на всех тестах. Картинки — локальные файлы: ![подпись](images/схема.png). "
+    "Возвращает plan_id, изменения, путь к diff, confirm_steps — шаги, которые уже решали ученики, и "
+    "confirm_delete — удаляемые шаги. "
+    "Покажите diff автору до stepik_apply_push. Работает только для курсов из ALLOWED_WRITE_COURSES "
+    "(«*» — любой курс, где аккаунт автор или преподаватель).",
     annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
 )
 def stepik_plan_push(course_id: int, lesson_position: str) -> str:
@@ -152,14 +157,69 @@ def stepik_plan_push(course_id: int, lesson_position: str) -> str:
 
 
 @mcp.tool(
-    description="Публикует на Stepik план из stepik_plan_push: загружает картинки, меняет и добавляет текстовые шаги. "
-    "Вызывать только после того, как автор увидел diff и явно подтвердил публикацию. Перед записью проверяет, "
-    "что файл и урок на Stepik не менялись, и сохраняет снимок урока в snapshots/.",
+    description="План отката урока к снимку из snapshots/ (снимок сохраняется перед каждой публикацией). "
+    "Изменённые шаги восстанавливаются, удалённые создаются заново с новым id (без комментариев и решений). "
+    "Ничего не отправляет. snapshot — имя файла снимка или latest (снимок перед последней публикацией, в том числе перед предыдущим откатом). Шаги, созданные после снимка, не удаляются; "
+    "локальный файл урока не меняется. Применяется тем же stepik_apply_push после подтверждения автора.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_rollback_lesson(course_id: int, lesson_position: str, snapshot: str = "latest") -> str:
+    return _run(lambda: json.dumps(publish.plan_rollback(CLIENT, course_id, lesson_position, snapshot),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Публикует на Stepik план из stepik_plan_push или stepik_rollback_lesson: загружает картинки, "
+    "меняет, добавляет или восстанавливает шаги. Вызывать только после того, как автор увидел diff и явно "
+    "подтвердил публикацию. confirm_steps — step_id из плана, которые уже решали ученики; передавайте их, только "
+    "если автор согласился изменить именно эти шаги. confirm_delete — ровно те step_id, которые план удаляет; "
+    "передавайте их, только если автор подтвердил удаление. Перед записью проверяет, что файл и урок на Stepik не "
+    "менялись, и сохраняет снимок урока в snapshots/.",
     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
                                 open_world_hint=True),
 )
-def stepik_apply_push(course_id: int, plan_id: str) -> str:
-    return _run(lambda: json.dumps(publish.apply_push(CLIENT, course_id, plan_id), ensure_ascii=False, indent=2))
+def stepik_apply_push(course_id: int, plan_id: str, confirm_steps: list[int] | None = None,
+                      confirm_delete: list[int] | None = None) -> str:
+    return _run(lambda: json.dumps(publish.apply_push(CLIENT, course_id, plan_id, confirm_steps, confirm_delete),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="План удаления комментариев под шагами курса. Ничего не удаляет. Фильтр обязателен: text — весь "
+    "текст комментария без HTML (например «!»), или contains — часть текста. По умолчанию только комментарии "
+    "аккаунта токена (user_id — другой пользователь) и только без ответов (include_replied=True — с ответами). "
+    "lesson_position (вид 6.2) ограничивает урок. Возвращает plan_id, число комментариев (confirm_count), "
+    "разбивку по урокам, примеры и путь к полному списку. Покажите автору до stepik_apply_delete_comments.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_delete_comments(course_id: int, text: str | None = None, contains: str | None = None,
+                                lesson_position: str | None = None, user_id: int | None = None,
+                                include_replied: bool = False) -> str:
+    return _run(lambda: json.dumps(moderation.plan_delete_comments(
+        CLIENT, course_id, text, contains, lesson_position, user_id, include_replied), ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Удаляет на Stepik комментарии из плана stepik_plan_delete_comments. confirm_count — число "
+    "комментариев из плана; передавайте его, только если автор подтвердил удаление. Комментарии, которые "
+    "изменились или получили ответы после плана, пропускаются. Копии удалённых сохраняются в snapshots/. "
+    "Удаление на Stepik не отменить.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+                                open_world_hint=True),
+)
+def stepik_apply_delete_comments(course_id: int, plan_id: str, confirm_count: int) -> str:
+    return _run(lambda: json.dumps(moderation.apply_delete_comments(CLIENT, course_id, plan_id, confirm_count),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Проверка «скачать → собрать обратно» для всех шагов курса: каждый шаг переводится в Markdown с "
+    "YAML-блоком, разбирается обратно и сравнивается с оригиналом Stepik до последнего поля. Только чтение. "
+    "Возвращает сводку по типам шагов и до 20 расхождений.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_check_roundtrip(course_id: int) -> str:
+    return _run(lambda: json.dumps(roundtrip.check_course(CLIENT, course_id), ensure_ascii=False, indent=2))
 
 
 @mcp.tool(description="Один шаг по его внутреннему id (не по номеру в уроке).")
