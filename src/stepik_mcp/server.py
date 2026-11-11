@@ -15,7 +15,8 @@ import re
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import coursemap, lessoncheck, moderation, publish, refresh, roundtrip
+from . import (coursemap, learners, lessoncheck, lessontools, moderation, publish, refresh, roundtrip, staging,
+               versions)
 from . import workspace as sw
 from .analytics import render_lesson_bundle, render_lesson_stats, render_step_stats
 from .client import StepikClient, StepikError
@@ -41,6 +42,8 @@ mcp = MCPServer(
         "из его ответа и AGENTS.md папки курса; 3) пройти курс учеником-тестировщиком: stepik_start_editing с "
         "mode='student', уроки по порядку, отчёт о том, что мешает ученику, без правок. "
         "Если ответ называет last_handoff, прочитай передачу и предложи продолжить с того места. "
+        "Длинный урок читай по шагам: stepik_lesson_outline даёт строки файла каждого шага. Перед правкой урока "
+        "сохраняй версию stepik_save_version. "
         "В режиме правки читай карту курса COURSE_LOGIC.md перед проверкой урока, проверяй предложения по ней "
         "(stepik_check_lesson) и обновляй запись урока после правки. Замечания показывай в чате коротко: номер, "
         "место (шаг, цитата), суть и варианты исправления; полный текст — в отчёте. Урок меняй только после "
@@ -186,8 +189,153 @@ def stepik_pull_course(course_id: int) -> str:
     "только если карты или структуры ещё нет.",
     annotations=LOCAL_WRITE,
 )
-def stepik_start_editing(course_id: int, mode: str = "edit") -> str:
-    return _local(coursemap.start_editing, course_id, mode)
+def stepik_start_editing(course_id: int, mode: str = "edit", level: str = "novice") -> str:
+    """level для mode='student': novice — полный новичок, experienced — ученик с опытом."""
+    return _local(coursemap.start_editing, course_id, mode, level)
+
+
+# Только локальные файлы: без запросов к Stepik.
+LOCAL_READ = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+LOCAL_ONLY_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False,
+                                   open_world_hint=False)
+
+
+def _offline(func, *args):
+    return _local(lambda _client, *rest: func(*rest), *args)
+
+
+@mcp.tool(
+    description="Оглавление локального урока: шаги с типом, заголовком, подзаголовками, числом слов, блоков кода и "
+    "картинок и строками файла (lines). Нужен, чтобы читать длинный урок по шагам, а не целиком. Без запросов к Stepik.",
+    annotations=LOCAL_READ,
+)
+def stepik_lesson_outline(course_id: int, lesson_position: str) -> str:
+    return _offline(lessontools.lesson_outline, course_id, lesson_position)
+
+
+@mcp.tool(
+    description="Сохранить локальную версию файла урока перед правкой (snapshots/local/<урок>/). Повторный вызов без "
+    "изменений новую версию не создаёт. На Stepik ничего не отправляет.",
+    annotations=LOCAL_ONLY_WRITE,
+)
+def stepik_save_version(course_id: int, lesson_position: str, note: str = "") -> str:
+    return _offline(versions.save_version, course_id, lesson_position, note)
+
+
+@mcp.tool(
+    description="Список локальных версий файла урока: время, заметка, сколько строк отличается от текущего файла.",
+    annotations=LOCAL_READ,
+)
+def stepik_list_versions(course_id: int, lesson_position: str) -> str:
+    return _offline(versions.list_versions, course_id, lesson_position)
+
+
+@mcp.tool(
+    description="Вернуть локальную версию урока целиком или только один шаг (step_id). Без apply=True только "
+    "показывает diff. С apply=True текущий файл сначала сохраняется новой версией, затем заменяется. "
+    "Применять только после явного согласия автора. На Stepik ничего не отправляет.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
+                                open_world_hint=False),
+)
+def stepik_restore_version(course_id: int, lesson_position: str, version: str, step_id: int | None = None,
+                           apply: bool = False) -> str:
+    return _offline(versions.restore_version, course_id, lesson_position, version, step_id, apply)
+
+
+@mcp.tool(
+    description="Запустить примеры ```python из локального урока и сравнить вывод с блоком ```text после примера. "
+    "Код автора курса выполняется на этом компьютере: отдельный процесс, временная папка, без секретов сервера, "
+    "пустой ввод, до 5 секунд. step — номер шага, чтобы проверить только его. Вызывать по запросу автора или в "
+    "режимах правки и проверки учеником. Возвращает только проблемные примеры и сводку.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True,
+                                open_world_hint=False),
+)
+def stepik_run_examples(course_id: int, lesson_position: str, step: int | None = None) -> str:
+    return _offline(lessontools.run_examples, course_id, lesson_position, step)
+
+
+@mcp.tool(
+    description="Проверка всех скачанных уроков курса тем же способом, что stepik_check_lesson: сводка по курсу "
+    "(где больше забегания вперёд, отсылок, «очевидно», длинных шагов, заданий без теории, какие уроки длиннее "
+    "остальных) и таблица в новом файле sessions/ГГГГ-ММ-ДД-course-check.md. Без запросов к Stepik.",
+    annotations=LOCAL_ONLY_WRITE,
+)
+def stepik_check_course(course_id: int) -> str:
+    return _offline(lessoncheck.check_course, course_id)
+
+
+@mcp.tool(
+    description="Словарь терминов курса из карты COURSE_LOGIC.md (какой термин в каком уроке введён, что введено "
+    "дважды) в генерируемый GLOSSARY.md и поиск нежелательных имён из таблицы «Термины и имена» в COURSE_STYLE.md "
+    "по скачанным урокам. Без запросов к Stepik.",
+    annotations=LOCAL_ONLY_WRITE,
+)
+def stepik_glossary(course_id: int) -> str:
+    return _offline(lessoncheck.glossary, course_id)
+
+
+@mcp.tool(
+    description="Предпросмотр локального урока в браузере: файл <урок>.preview.html рядом с уроком, шаги и задания "
+    "без ответов, примерно как их увидит ученик. Файл создаётся заново при каждом вызове; урок не меняется. "
+    "Без запросов к Stepik.",
+    annotations=LOCAL_ONLY_WRITE,
+)
+def stepik_preview_lesson(course_id: int, lesson_position: str) -> str:
+    return _offline(lessontools.preview_lesson, course_id, lesson_position)
+
+
+@mcp.tool(
+    description="Сводка комментариев учеников по шагам урока из сохранённого .comments.md: сколько комментариев, "
+    "вопросов и жалоб («не понял», «почему», «не работает»), короткие примеры без имён. Без запросов к Stepik; "
+    "комментарии сохраняет stepik_cache_lesson_comments. Только по запросу автора или в режимах правки и проверки.",
+    annotations=LOCAL_READ,
+)
+def stepik_comment_digest(course_id: int, lesson_position: str) -> str:
+    return _offline(learners.comment_digest, course_id, lesson_position)
+
+
+@mcp.tool(
+    description="Типичные ошибки учеников в задании: неверные решения шага сгруппированы по отзыву Stepik или по "
+    "одинаковому ответу, с долей и примером, без имён. Только GET к Stepik; только по явному запросу автора. "
+    "Данные API ещё не сверены с интерфейсом Stepik.",
+    annotations=READ_ONLY,
+)
+def stepik_task_mistakes(step_id: int, scan_limit: int = 1000) -> str:
+    return _run(lambda: json.dumps(learners.task_mistakes(CLIENT, step_id, scan_limit), ensure_ascii=False,
+                                   indent=2))
+
+
+@mcp.tool(
+    description="Снимок показателей заданий урока (попытки, успешность по выборке решений, комментарии) в "
+    "metrics/<урок>/<время>.json, чтобы потом сравнить «до и после» правки. Только GET к Stepik, запись только "
+    "в папку курса. Только по явному запросу автора.",
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False,
+                                open_world_hint=True),
+)
+def stepik_save_metrics(course_id: int, lesson_position: str, max_submissions: int = 300, note: str = "") -> str:
+    return _run(lambda: json.dumps(learners.save_metrics(CLIENT, course_id, lesson_position, max_submissions, note),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Сравнить два снимка показателей урока (по умолчанию два последних): успешность и попытки по "
+    "заданиям, комментарии по шагам. Без запросов к Stepik.",
+    annotations=LOCAL_READ,
+)
+def stepik_compare_metrics(course_id: int, lesson_position: str, before: str | None = None,
+                           after: str | None = None) -> str:
+    return _offline(learners.compare_metrics, course_id, lesson_position, before, after)
+
+
+@mcp.tool(
+    description="Подготовить урок к проверке в тестовом курсе: копия урока новым черновиком drafts/… в папке "
+    "тестового курса (шаги <!-- new_step -->, задания, локальные картинки). На Stepik ничего не отправляет; "
+    "дальше stepik_plan_create_lesson и stepik_plan_push в тестовый курс с подтверждением автора. Папка "
+    "тестового курса должна существовать (stepik_start_editing или stepik_cache_lesson для него).",
+    annotations=LOCAL_ONLY_WRITE,
+)
+def stepik_stage_lesson(course_id: int, lesson_position: str, test_course_id: int) -> str:
+    return _offline(staging.stage_lesson, course_id, lesson_position, test_course_id)
 
 
 @mcp.tool(
@@ -198,7 +346,7 @@ def stepik_start_editing(course_id: int, mode: str = "edit") -> str:
     annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
 )
 def stepik_check_lesson(course_id: int, lesson_position: str) -> str:
-    return _local(lambda _client, *args: lessoncheck.check_lesson(*args), course_id, lesson_position)
+    return _offline(lessoncheck.check_lesson, course_id, lesson_position)
 
 
 @mcp.tool(
@@ -208,7 +356,7 @@ def stepik_check_lesson(course_id: int, lesson_position: str) -> str:
     annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
 )
 def stepik_course_status(course_id: int) -> str:
-    return _local(lambda _client, *args: coursemap.course_status(*args), course_id)
+    return _offline(coursemap.course_status, course_id)
 
 
 @mcp.prompt(name="stepik_start", title="Stepik: с чего начать",
@@ -229,13 +377,16 @@ def prompt_start() -> str:
 
 @mcp.prompt(name="stepik_student", title="Stepik: пройти курс учеником",
             description="Агент-тестировщик проходит уроки по порядку и ищет, что мешает ученику.")
-def prompt_student(course_id: str = "", lessons: str = "") -> str:
+def prompt_student(course_id: str = "", lessons: str = "", level: str = "novice") -> str:
     target = f"курса {course_id}" if course_id else "курса (спроси у меня номер)"
     which = f"уроки {lessons}" if lessons else "уроки по порядку с первого (или те, что я назову)"
+    who = "ученик с опытом" if level == "experienced" else "полный новичок"
+    level = "experienced" if level == "experienced" else "novice"
     return (
-        f"Режим «ученик-тестировщик» для {target}. Вызови stepik_start_editing с mode='student' и следуй правилам "
-        f"из ответа. Пройди {which}: скачай урок, прочитай его как ученик, который знает только пройденные уроки, "
-        "реши задания сам по материалу урока, вызови stepik_check_lesson. Критерии — rules/STUDENT_TEST_RULES.md. "
+        f"Режим «ученик-тестировщик» ({who}) для {target}. Вызови stepik_start_editing с mode='student' и "
+        f"level='{level}' и следуй правилам из ответа. Пройди {which}: скачай урок, прочитай его как ученик, "
+        "который знает только пройденные уроки, реши задания сам по материалу урока, вызови stepik_check_lesson и "
+        "stepik_run_examples. Критерии — rules/STUDENT_TEST_RULES.md. "
         "Отчёт запиши в sessions/ГГГГ-ММ-ДД-student-<урок>.md, а мне в чате коротко: номер, где, что случилось "
         "с учеником, тяжесть. Уроки и карту не меняй. В конце предложи перейти к правке по находкам."
     )

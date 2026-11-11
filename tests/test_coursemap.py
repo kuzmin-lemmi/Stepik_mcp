@@ -10,7 +10,7 @@ from stepik_mcp import coursemap, lessoncheck, server
 from stepik_mcp.client import StepikClient, StepikError
 
 
-class StartEditingTests(unittest.TestCase):
+class CourseFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=os.environ.get("STEPIK_MCP_TEST_TMPDIR"))
         self.addCleanup(self.temporary.cleanup)
@@ -43,6 +43,8 @@ class StartEditingTests(unittest.TestCase):
         self.assertIn(endpoint, self.data, "Unexpected endpoint")
         return {endpoint: [row for row in self.data[endpoint] if row["id"] in params["ids"]]}
 
+
+class StartEditingTests(CourseFixture):
     def test_first_call_creates_map_with_every_module_and_lesson(self):
         result = coursemap.start_editing(self.client, 1)
         text = (self.folder / "COURSE_LOGIC.md").read_text(encoding="utf-8")
@@ -142,7 +144,7 @@ solution: solutions/loop.py
 """
 
 
-class LessonCheckAndStatusTests(StartEditingTests):
+class PreparedCourse(CourseFixture):
     def prepare(self):
         coursemap.start_editing(self.client, 1)
         logic = self.folder / "COURSE_LOGIC.md"
@@ -161,6 +163,8 @@ class LessonCheckAndStatusTests(StartEditingTests):
         path.write_text(LESSON, encoding="utf-8")
         return path
 
+
+class LessonCheckAndStatusTests(PreparedCourse):
     def test_check_finds_terms_from_later_lessons_references_and_hand_waving(self):
         self.prepare()
         calls = self.client.get.call_count
@@ -183,11 +187,13 @@ class LessonCheckAndStatusTests(StartEditingTests):
         self.assertEqual(result["tasks"], [{"step": 1, "type": "string"},
                                            {"step": 3, "type": "code", "solution": True}])
 
-    def test_check_without_map_explains_what_to_do(self):
+    def test_check_without_map_still_checks_references(self):
         self.prepare()
         (self.folder / "COURSE_LOGIC.md").unlink()
-        with self.assertRaises(StepikError):
-            lessoncheck.check_lesson(1, "1.2")
+        result = lessoncheck.check_lesson(1, "1.2")
+        self.assertFalse(result["course_logic"])
+        self.assertEqual(result["ahead_of_map"], [])
+        self.assertEqual(result["references_count"], 3)
 
     def test_status_lists_reports_comments_and_next_steps(self):
         path = self.prepare()

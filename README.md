@@ -188,6 +188,13 @@ claude mcp add stepik --scope user -e STEPIK_CLIENT_ID=<client_id> -e STEPIK_CLI
 | `stepik_start_editing` | Начать работу над курсом: `mode="edit"` (править вместе) или `"student"` (ученик-тестировщик). Правила, `DECISIONS.md` и карта курса `COURSE_LOGIC.md`; ответ — что в карте не заполнено и последняя передача | ✅ |
 | `stepik_check_lesson` | Урок по карте: термины из будущих уроков (в том числе в заданиях), отсылки к другим урокам, «очевидно», длинные шаги, задания без теории перед ними. Без запросов к Stepik | ✅ |
 | `stepik_course_status` | Что дальше по курсу: состояние уроков, отчёты в `sessions/`, уроки с комментариями, последняя передача. Без запросов к Stepik | ✅ |
+| `stepik_check_course` | `stepik_check_lesson` по всем скачанным урокам: сводка и таблица в `sessions/…-course-check.md` | ✅ |
+| `stepik_glossary` | Словарь терминов из карты в `GLOSSARY.md` и поиск нежелательных имён из таблицы «Термины и имена» | ✅ |
+| `stepik_lesson_outline` | Оглавление урока со строками файла каждого шага, чтобы читать длинный урок по частям | ✅ |
+| `stepik_save_version`, `stepik_list_versions`, `stepik_restore_version` | Локальные версии урока перед правкой; вернуть весь файл или один шаг (сначала diff, потом `apply=True`) | ✅ |
+| `stepik_run_examples` | Запустить примеры ```` ```python ```` урока и сравнить с выводом в тексте; куски кода из середины программы помечаются `fragment` | ✅ |
+| `stepik_preview_lesson` | HTML-предпросмотр урока, как его увидит ученик, без ответов | ✅ |
+| `stepik_stage_lesson` | Копия урока черновиком в тестовый курс; дальше обычные `stepik_plan_create_lesson` и `stepik_plan_push` | ✅ |
 | `stepik_plan_create_lesson` | План создания нового урока из локального черновика; применяется `stepik_apply_push` | ✅ |
 | `stepik_upgrade_lesson` | Перевести урок, скачанный старой версией, в текущий формат без потери правок | ✅ |
 | `stepik_plan_move_lesson` | План перестановки урока внутри модуля; применяется `stepik_apply_push` | ✅ |
@@ -205,9 +212,12 @@ claude mcp add stepik --scope user -e STEPIK_CLIENT_ID=<client_id> -e STEPIK_CLI
 | `stepik_lesson_comments` | Комментарии ко всему уроку по шагам | ✅ |
 | `stepik_wrong_submissions` | Обезличенная выборка неверных решений | 🧪 |
 | `stepik_course_reviews` | Отзывы о курсе | 🧪 |
+| `stepik_comment_digest` | Вопросы и жалобы учеников по шагам из сохранённого `.comments.md`, без имён | ✅ |
+| `stepik_task_mistakes` | Типичные неверные ответы задания: группы по отзыву Stepik или по одинаковому ответу | 🧪 |
 | **Аналитика** | | |
 | `stepik_lesson_stats` | Просмотры, прохождения, среднее время урока | ✅ |
 | `stepik_step_stats` | Попытки, успешность, оценки шага | 🧪 |
+| `stepik_save_metrics`, `stepik_compare_metrics` | Снимок показателей заданий урока в `metrics/` и сравнение «до и после» правки | 🧪 |
 | `stepik_lesson_bundle` | Пакет для ИИ-редактора: урок + комментарии + статистика | 🧪 |
 
 ✅ проверено на реальных данных · 🧪 код есть, достоверность данных ещё проверяется
@@ -291,10 +301,16 @@ C:\Courses\course-266999\
 ├── AGENTS.md                     # правила для агента
 ├── .stepik/steps/                # исходники шагов Stepik на момент скачивания (база для diff)
 ├── .stepik/plans/                # планы публикации и diff
+├── GLOSSARY.md                   # словарь терминов (генерирует stepik_glossary)
 ├── snapshots/                    # урок до каждой публикации
+├── snapshots/local/5.2/          # локальные версии урока до правок (stepik_save_version)
+├── metrics/5.2/                  # снимки показателей «до и после» (stepik_save_metrics)
+├── sessions/                     # рецензии, отчёты ученика, проверка курса, передачи
+├── drafts/                       # черновики уроков, в том числе копии для тестового курса
 ├── logs/stepik-write.log         # журнал записи на Stepik
 └── 05-<модуль>-<section_id>\
     ├── 05.02-lesson-2498212.md           # рабочая копия урока
+    ├── 05.02-lesson-2498212.preview.html # предпросмотр (генерирует stepik_preview_lesson)
     └── 05.02-lesson-2498212.comments.md  # комментарии учеников
 ```
 
@@ -337,7 +353,11 @@ src/stepik_mcp/
 ├── analytics.py   # статистика урока и шага
 ├── workspace.py   # локальная папка курса
 ├── coursemap.py   # режимы работы, карта курса COURSE_LOGIC.md, состояние работ
-├── lessoncheck.py # проверка урока по карте: забегание вперёд, отсылки, «очевидно»
+├── lessoncheck.py # проверка урока и курса по карте, словарь терминов
+├── lessontools.py # оглавление урока, запуск примеров кода, предпросмотр
+├── versions.py    # локальные версии урока до правок
+├── learners.py    # комментарии учеников, типичные ошибки, показатели «до и после»
+├── staging.py     # копия урока черновиком в тестовый курс
 ├── steps.py       # шаг Stepik <-> условие в Markdown + YAML-блок настроек
 ├── publish.py     # публикация текстовых шагов и картинок (plan/apply)
 ├── roundtrip.py   # проверка «скачать -> собрать обратно» для курса

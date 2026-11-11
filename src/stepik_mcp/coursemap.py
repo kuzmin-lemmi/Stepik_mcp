@@ -38,7 +38,11 @@ COMMON_RULES = [
 EDIT_RULES = [
     "Перед проверкой или правкой урока прочитай COURSE_LOGIC.md, COURSE_STYLE.md, DECISIONS.md и нужные файлы rules/.",
     "Пустые места карты заполняй по тексту уроков и показывай автору; цели курса и модулей подтверждает автор.",
-    "Перед рецензией вызови stepik_check_lesson: он находит термины из будущих уроков, отсылки и «очевидно».",
+    "Длинный урок читай по шагам: stepik_lesson_outline даёт строки файла для каждого шага.",
+    "Перед рецензией вызови stepik_check_lesson: он находит термины из будущих уроков, отсылки и «очевидно». "
+    "Примеры кода проверяй stepik_run_examples, комментарии учеников — stepik_comment_digest (если сохранены).",
+    "Перед правкой урока сохрани версию: stepik_save_version. Вернуть весь файл или один шаг — "
+    "stepik_restore_version (сначала без apply, показать автору).",
     "REVIEW: замечания с местом (шаг, step_id, цитата) и вариантами A/B/C пиши в sessions/ГГГГ-ММ-ДД-review-<урок>.md, "
     "урок не меняй. Если есть отчёт ученика (sessions/*-student-<урок>.md), начни с его находок.",
     "Жди ответа автора вида «1A, 2 — свой вариант, 3 пропусти». Принятые пункты вноси все сразу, отметь их "
@@ -46,6 +50,8 @@ EDIT_RULES = [
     "Задание опирается только на то, что было в этом уроке и в предыдущих по карте. Для задачи на код добавь "
     "эталонное решение (solution: в YAML-блоке) — stepik_plan_push прогонит его на тестах.",
     "После правки урока обнови его запись в COURSE_LOGIC.md (термины, задания, «Состояние: исправлен»).",
+    "Перед публикацией можно показать автору stepik_preview_lesson, а крупную правку сначала выложить в "
+    "тестовый курс через stepik_stage_lesson.",
     "Публикация: stepik_plan_push → показать diff → явное «да» → stepik_apply_push.",
 ]
 STUDENT_RULES = [
@@ -56,8 +62,16 @@ STUDENT_RULES = [
     "stepik_check_lesson подскажет термины из будущих уроков, отсылки и «очевидно»; проверь их глазами ученика.",
     "Отчёт пиши в sessions/ГГГГ-ММ-ДД-student-<урок>.md: номер, где (шаг и цитата), что случилось с учеником, "
     "тяжесть (блокер / мешает / мелочь), критерий. Урок и карту не меняй.",
+    "Примеры кода проверяй stepik_run_examples: ошибка или другой вывод в примере — находка.",
     "После отчёта предложи автору перейти к правке: режим «править курс вместе» начнёт с находок ученика.",
 ]
+LEVELS = {
+    "novice": "Ты полный новичок: знаешь только то, что было в пройденных уроках этого курса. Любой "
+              "необъяснённый термин, пропущенный шаг рассуждения или «догадайся сам» — находка.",
+    "experienced": "Ты ученик с опытом: основы знаешь, но курс проходишь впервые. Ищи то, что мешает именно "
+                   "тебе: долгие повторы известного, медленный темп, задания без новой мысли, неточности, "
+                   "которые опытный заметит сразу.",
+}
 
 
 def _lesson_key(key):
@@ -188,12 +202,14 @@ def last_handoff(folder):
     return f"sessions/{names[-1]}" if names else None
 
 
-def start_editing(client, course_id, mode="edit"):
+def start_editing(client, course_id, mode="edit", level="novice"):
     """Готовит папку курса к совместной работе и возвращает, что в карте ещё не заполнено."""
     if type(course_id) is not int or course_id < 1:
         raise StepikError("course_id must be a positive integer", status=400)
     if mode not in MODES:
         raise StepikError(f"mode: {' или '.join(MODES)}", status=400)
+    if level not in LEVELS:
+        raise StepikError(f"level: {' или '.join(LEVELS)}", status=400)
     root = sw.workspace_root()
     root.mkdir(parents=True, exist_ok=True)
     folder = sw._inside(root, f"course-{course_id}")
@@ -232,10 +248,11 @@ def start_editing(client, course_id, mode="edit"):
             hint = "Спроси автора, с какого урока начать."
         else:
             read_first = ["rules/STUDENT_TEST_RULES.md", LOGIC_FILE]
-            rules = STUDENT_RULES + COMMON_RULES
+            rules = [LEVELS[level]] + STUDENT_RULES + COMMON_RULES
             hint = "Спроси автора, какие уроки пройти (по умолчанию — с первого по порядку)."
         return {
-            "status": "ready", "mode": mode, "course_id": course_id, "course_path": str(folder),
+            "status": "ready", "mode": mode, **({"level": level} if mode == "student" else {}),
+            "course_id": course_id, "course_path": str(folder),
             "course_logic": {"path": str(logic), "status": status},
             "lesson_count": len(order), "downloaded_lessons": len(downloaded),
             "lessons_without_summary": empty[:LIMIT], "lessons_without_summary_count": len(empty),

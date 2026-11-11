@@ -41,7 +41,8 @@ If the author has not said what they want, offer a choice:
    stepik_cache_course_text_lessons. No review, no course map, no edits.
 2. Edit the course together: call stepik_start_editing once, then follow the
    editorial workflow below.
-3. Student test: call stepik_start_editing with mode="student" and go through the
+3. Student test: call stepik_start_editing with mode="student" (level="novice" or
+   "experienced") and go through the
    lessons in order as a learner who knows only the lessons already passed. Use the
    criteria in rules/STUDENT_TEST_RULES.md, write sessions/YYYY-MM-DD-student-<lesson>.md
    and do not edit the lesson. Then offer the author to switch to editing.
@@ -73,13 +74,17 @@ concrete dependency (what the learner already knows, names used earlier).
    rules and the course map and write a report to sessions/YYYY-MM-DD-review-<lesson>.md
    in the format of rules/REVIEW_RULES.md. Start from the findings of a student report
    for this lesson if there is one. Do not edit the lesson during a review.
-2. REVISE: apply all items the author agreed to at once, mark them in the report, then
+   Read a long lesson step by step with stepik_lesson_outline; check code examples with
+   stepik_run_examples and saved learner comments with stepik_comment_digest.
+2. REVISE: save a version first (stepik_save_version; stepik_restore_version returns the
+   whole file or one step). Apply all items the author agreed to at once, mark them in the report, then
    make one plan. Keep step markers and step IDs. A task may rely only on this lesson
    and earlier lessons of the map; give a code task a reference solution (solution: in
    the YAML block) so that stepik_plan_push runs it on the tests. Re-check the changed
    steps against the rules afterwards.
-3. PUBLISH: stepik_plan_push, show the diff and warnings to the author, and call
-   stepik_apply_push only after an explicit yes.
+3. PUBLISH: optionally show stepik_preview_lesson or stage the lesson in a test course
+   (stepik_stage_lesson). Then stepik_plan_push, show the diff and warnings to the author,
+   and call stepik_apply_push only after an explicit yes.
 4. HANDOFF: at the end of a session write sessions/YYYY-MM-DD-handoff.md from
    sessions/HANDOFF_TEMPLATE.md so the next session can continue without this chat.
 
@@ -296,7 +301,7 @@ def _atomic_write(path, text, *, replace=False):
 
 
 # Служебные записи сервера (планы, журнал, снимки) не делают папку курса «чужой».
-SERVICE_ENTRIES = {".stepik", "logs", "snapshots"}
+SERVICE_ENTRIES = {".stepik", "logs", "snapshots", "metrics"}
 
 # Статистика и служебные поля меняются без правки шага; в исходник они не попадают.
 VOLATILE_STEP_FIELDS = {
