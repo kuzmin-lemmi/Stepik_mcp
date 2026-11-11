@@ -15,7 +15,7 @@ import re
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import moderation, publish, refresh, roundtrip
+from . import coursemap, lessoncheck, moderation, publish, refresh, roundtrip
 from . import workspace as sw
 from .analytics import render_lesson_bundle, render_lesson_stats, render_step_stats
 from .client import StepikClient, StepikError
@@ -35,6 +35,16 @@ CLIENT = StepikClient(
 mcp = MCPServer(
     name="stepik",
     instructions=(
+        "Три режима работы. Если пользователь не сказал, чем заняться, предложи выбор: "
+        "1) скачать тексты уроков (stepik_cache_lesson, stepik_pull_course, stepik_cache_course_text_lessons) "
+        "без рецензии и правок; 2) править курс вместе: один раз вызови stepik_start_editing и следуй правилам "
+        "из его ответа и AGENTS.md папки курса; 3) пройти курс учеником-тестировщиком: stepik_start_editing с "
+        "mode='student', уроки по порядку, отчёт о том, что мешает ученику, без правок. "
+        "Если ответ называет last_handoff, прочитай передачу и предложи продолжить с того места. "
+        "В режиме правки читай карту курса COURSE_LOGIC.md перед проверкой урока, проверяй предложения по ней "
+        "(stepik_check_lesson) и обновляй запись урока после правки. Замечания показывай в чате коротко: номер, "
+        "место (шаг, цитата), суть и варианты исправления; полный текст — в отчёте. Урок меняй только после "
+        "ответа автора, принятые пункты вноси все сразу. "
         "Запись на Stepik только через stepik_plan_push -> показ diff автору -> явное подтверждение -> stepik_apply_push. "
         "stepik_cache_lesson записывает рабочий Markdown в локальную папку курсов (COURSE_WORKSPACE_ROOT). "
         "Для получения урока по номеру используй stepik_cache_lesson: ответ содержит путь, а не полный текст. "
@@ -165,6 +175,110 @@ def stepik_cache_course_text_lessons(course_id: int) -> str:
 )
 def stepik_pull_course(course_id: int) -> str:
     return _run(lambda: json.dumps(sw.pull_course(CLIENT, course_id), ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="Начать совместную работу над курсом. mode='edit' — править курс вместе, mode='student' — пройти "
+    "курс учеником-тестировщиком. Готовит папку курса: правила (в том числе rules/STUDENT_TEST_RULES.md), "
+    "DECISIONS.md и карту курса COURSE_LOGIC.md (о чём курс, модули, что ученик узнаёт в каждом уроке). Карта "
+    "создаётся один раз по структуре курса и дальше не перезаписывается. Возвращает путь к карте, незаполненные и "
+    "отсутствующие в ней уроки, последнюю передачу и правила режима, без текста уроков. Только GET к Stepik, и "
+    "только если карты или структуры ещё нет.",
+    annotations=LOCAL_WRITE,
+)
+def stepik_start_editing(course_id: int, mode: str = "edit") -> str:
+    return _local(coursemap.start_editing, course_id, mode)
+
+
+@mcp.tool(
+    description="Проверка локального урока по карте курса COURSE_LOGIC.md: термины, которые карта относит к более "
+    "поздним урокам (забегание вперёд, отдельно — в заданиях), отсылки к другим урокам и будущему материалу, "
+    "«очевидно» и «как известно» вместо объяснения, длинные шаги, задания без теории перед ними. Эвристика: "
+    "находки проверяет агент. Только локальные файлы, ответ — номера шагов и короткие цитаты.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+)
+def stepik_check_lesson(course_id: int, lesson_position: str) -> str:
+    return _local(lambda _client, *args: lessoncheck.check_lesson(*args), course_id, lesson_position)
+
+
+@mcp.tool(
+    description="Что сделано по курсу и что делать дальше: состояние уроков по карте, отчёты рецензий, ученика и "
+    "второго взгляда в sessions/, нескачанные уроки, уроки с наибольшим числом сохранённых комментариев и последняя "
+    "передача. Только локальные файлы, без запросов к Stepik.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+)
+def stepik_course_status(course_id: int) -> str:
+    return _local(lambda _client, *args: coursemap.course_status(*args), course_id)
+
+
+@mcp.prompt(name="stepik_start", title="Stepik: с чего начать",
+            description="Выбрать режим: скачать уроки, править курс вместе или пройти его учеником.")
+def prompt_start() -> str:
+    return (
+        "Если я назвал курс и он уже есть в папке курсов, сначала вызови stepik_course_status: если есть "
+        "последняя передача, прочитай её и предложи продолжить с того места.\n"
+        "Предложи мне выбор из трёх режимов и дождись ответа:\n"
+        "1. Скачать тексты уроков — только скачать нужные уроки или весь курс в локальную папку, без рецензии и правок.\n"
+        "2. Править курс вместе — карта курса, поиск ошибок и недочётов с вариантами исправления, "
+        "правка только после моего одобрения, публикация через diff.\n"
+        "3. Пройти курс учеником — агент-тестировщик проходит уроки по порядку и пишет, что мешает ученику; "
+        "уроки не меняет, после отчёта можно перейти к правке.\n"
+        "Спроси номер курса, если я его не назвал. Мои курсы можно показать через stepik_my_courses."
+    )
+
+
+@mcp.prompt(name="stepik_student", title="Stepik: пройти курс учеником",
+            description="Агент-тестировщик проходит уроки по порядку и ищет, что мешает ученику.")
+def prompt_student(course_id: str = "", lessons: str = "") -> str:
+    target = f"курса {course_id}" if course_id else "курса (спроси у меня номер)"
+    which = f"уроки {lessons}" if lessons else "уроки по порядку с первого (или те, что я назову)"
+    return (
+        f"Режим «ученик-тестировщик» для {target}. Вызови stepik_start_editing с mode='student' и следуй правилам "
+        f"из ответа. Пройди {which}: скачай урок, прочитай его как ученик, который знает только пройденные уроки, "
+        "реши задания сам по материалу урока, вызови stepik_check_lesson. Критерии — rules/STUDENT_TEST_RULES.md. "
+        "Отчёт запиши в sessions/ГГГГ-ММ-ДД-student-<урок>.md, а мне в чате коротко: номер, где, что случилось "
+        "с учеником, тяжесть. Уроки и карту не меняй. В конце предложи перейти к правке по находкам."
+    )
+
+
+@mcp.prompt(name="stepik_second_opinion", title="Stepik: второй взгляд",
+            description="Другая модель проверяет рецензию урока: согласна ли и что пропущено.")
+def prompt_second_opinion(course_id: str = "", lesson: str = "") -> str:
+    target = f"урока {lesson} курса {course_id}" if lesson and course_id else "урока (спроси у меня курс и урок)"
+    return (
+        f"Второй взгляд на рецензию {target}. Найди в sessions/ папки курса последний отчёт review или student по "
+        "этому уроку, прочитай его, сам урок, COURSE_LOGIC.md и правила курса. По каждому пункту отчёта ответь: "
+        "согласен / не согласен и почему / уточнение. Затем перечисли, что первый рецензент пропустил. Запиши "
+        "результат в sessions/ГГГГ-ММ-ДД-second-<урок>.md. Урок не меняй. Мне в чате — короткая сводка."
+    )
+
+
+@mcp.prompt(name="stepik_download", title="Stepik: скачать уроки",
+            description="Скачать тексты уроков или весь курс без правок.")
+def prompt_download(course_id: str = "", lessons: str = "") -> str:
+    target = f"курса {course_id}" if course_id else "курса (спроси у меня номер)"
+    which = f"уроки {lessons}" if lessons else "уроки, которые я назову, или весь курс"
+    return (
+        f"Режим «скачать тексты уроков». Скачай {which} {target}: один урок — stepik_cache_lesson, "
+        "весь курс — stepik_pull_course, только текстовые шаги — stepik_cache_course_text_lessons. "
+        "Не рецензируй и не правь уроки, не выводи их текст в чат: покажи пути к файлам и краткую сводку."
+    )
+
+
+@mcp.prompt(name="stepik_edit", title="Stepik: править курс вместе",
+            description="Редакторский режим с картой курса, вариантами исправлений и подтверждением.")
+def prompt_edit(course_id: str = "", lesson: str = "") -> str:
+    target = f"курса {course_id}" if course_id else "курса (спроси у меня номер)"
+    start = f"Начнём с урока {lesson}." if lesson else "Спроси, с какого урока начать."
+    return (
+        f"Режим «править курс вместе» для {target}. Вызови stepik_start_editing и следуй правилам из ответа. "
+        f"{start} Скачай урок, прочитай COURSE_LOGIC.md и правила курса, вызови stepik_check_lesson; если есть "
+        "отчёт ученика по уроку, начни с его находок. Найди ошибки и недочёты и запиши рецензию в sessions/. "
+        "Мне в чате покажи замечания коротко по номерам: где (шаг и цитата), что не так одной строкой и буквы "
+        "вариантов A/B/C (замена текста, вставка, изменение задания); полный текст — в отчёте. Урок не меняй, "
+        "пока я не отвечу; принятые пункты внеси все сразу. После правки обнови запись урока в COURSE_LOGIC.md; "
+        "на Stepik публикуй только через stepik_plan_push (один общий diff) и моё «да»."
+    )
 
 
 @mcp.tool(
