@@ -15,8 +15,8 @@ import re
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import (coursemap, learners, lessoncheck, lessontools, moderation, publish, refresh, roundtrip, staging,
-               versions)
+from . import (coursemap, learners, lessoncheck, lessontools, moderation, publish, refresh, roundtrip,
+               setupcheck, staging, versions)
 from . import workspace as sw
 from .analytics import render_lesson_bundle, render_lesson_stats, render_step_stats
 from .client import StepikClient, StepikError
@@ -36,6 +36,10 @@ CLIENT = StepikClient(
 mcp = MCPServer(
     name="stepik",
     instructions=(
+        "Первое использование: при первом подключении в разговоре, после ошибки CONFIG_MISSING или AUTH_FAILED "
+        "или если пользователь просит установить или проверить сервер, вызови stepik_setup_check и проведи "
+        "пользователя по шагам из его ответа. Ключи Stepik не проси присылать в чат: пользователь вписывает их "
+        "в конфиг клиента сам. "
         "Три режима работы. Если пользователь не сказал, чем заняться, предложи выбор: "
         "1) скачать тексты уроков (stepik_cache_lesson, stepik_pull_course, stepik_cache_course_text_lessons) "
         "без рецензии и правок; 2) править курс вместе: один раз вызови stepik_start_editing и следуй правилам "
@@ -92,7 +96,8 @@ def _guard():
         if not os.environ.get(name)
     ]
     if missing:
-        return error_json("CONFIG_MISSING", "Не заданы переменные окружения: " + ", ".join(missing))
+        return error_json("CONFIG_MISSING", "Не заданы переменные окружения: " + ", ".join(missing)
+                          + ". Вызовите stepik_setup_check: он покажет, что настроить.")
     return None
 
 
@@ -124,6 +129,19 @@ def stepik_whoami() -> str:
             f"Авторизация работает."
         )
     return _run(work)
+
+
+@mcp.tool(
+    description="Проверка установки при первом подключении: заданы ли ключи (без значений), работает ли "
+    "авторизация, где папка курсов и какие курсы в ней уже есть, разрешена ли публикация. Возвращает проблемы "
+    "и следующие шаги. Вызывай при первом использовании и после ошибок CONFIG_MISSING или AUTH_FAILED.",
+    annotations=READ_ONLY,
+)
+def stepik_setup_check() -> str:
+    try:
+        return json.dumps(setupcheck.setup_check(CLIENT), ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return _error(exc)
 
 
 @mcp.tool(annotations=READ_ONLY, description="Список курсов, где указанный аккаунт значится преподавателем. По умолчанию — текущий аккаунт.")
@@ -363,7 +381,9 @@ def stepik_course_status(course_id: int) -> str:
             description="Выбрать режим: скачать уроки, править курс вместе или пройти его учеником.")
 def prompt_start() -> str:
     return (
-        "Если я назвал курс и он уже есть в папке курсов, сначала вызови stepik_course_status: если есть "
+        "Сначала вызови stepik_setup_check. Если в ответе есть problems, объясни мне коротко, что настроить, и "
+        "дождись, пока я поправлю. Если у курса из ответа есть last_handoff, предложи продолжить с него.\n"
+        "Если я назвал курс и он уже есть в папке курсов, вызови stepik_course_status: если есть "
         "последняя передача, прочитай её и предложи продолжить с того места.\n"
         "Предложи мне выбор из трёх режимов и дождись ответа:\n"
         "1. Скачать тексты уроков — только скачать нужные уроки или весь курс в локальную папку, без рецензии и правок.\n"
