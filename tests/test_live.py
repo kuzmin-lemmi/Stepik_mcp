@@ -98,6 +98,53 @@ class LiveStepikTests(unittest.TestCase):
         self.rollback()
         self.assertEqual(self.remote_texts(), before)
 
+    def test_modules_create_move_delete(self):
+        """Два временных модуля и пустой урок: создание, перенос, переименование, удаление."""
+        def modules():
+            return [(sid, title, pos, len(units)) for sid, title, pos, units in publish._course_sections(self.client, COURSE)]
+
+        def apply(plan, **kw):
+            return publish.apply_push(self.client, COURSE, plan["plan_id"], **kw)
+
+        before = modules()
+        n = len(before)
+        created = {"sections": [], "lesson": None}
+        self.addCleanup(self._remove_live_objects, created)
+        with self.env(self.root_a):
+            sw.cache_lesson(self.client, COURSE, self.position)
+            folder = self.root_a / f"course-{COURSE}"
+            a = apply(publish.plan_create_module(self.client, COURSE, "MCP live A"))
+            created["sections"].append(a["section_id"])
+            (folder / a["path"] / "draft.md").write_text("# MCP live\n\n<!-- new_step -->\nТекст\n", encoding="utf-8")
+            lesson = apply(publish.plan_create_lesson(self.client, COURSE, f"{a['path']}/draft.md", n + 1))
+            created["lesson"] = lesson["lesson_id"]
+            b = apply(publish.plan_create_module(self.client, COURSE, "MCP live B", module_position=n + 1))
+            created["sections"].append(b["section_id"])
+            self.assertEqual([m[1] for m in modules()[-2:]], ["MCP live B", "MCP live A"])
+            self.assertEqual([m[2] for m in modules()], list(range(1, n + 3)))
+            moved = apply(publish.plan_move_lesson(self.client, COURSE, f"{n + 2}.1", module_position=n + 1))
+            self.assertEqual(moved["lesson_position"], f"{n + 1}.1")
+            apply(publish.plan_rename_module(self.client, COURSE, n + 1, "MCP live B2"))
+            apply(publish.plan_move_module(self.client, COURSE, n + 1, n + 2))
+            self.assertEqual([m[1:] for m in modules()[-2:]], [("MCP live A", n + 1, 0), ("MCP live B2", n + 2, 1)])
+            apply(publish.plan_delete_lesson(self.client, COURSE, f"{n + 2}.1"), confirm_delete=[created["lesson"]])
+            created["lesson"] = None
+            for position in (n + 2, n + 1):
+                plan = publish.plan_delete_module(self.client, COURSE, position)
+                apply(plan, confirm_delete=[plan["section_id"]])
+                created["sections"].remove(plan["section_id"])
+        self.assertEqual(modules(), before)
+
+    def _remove_live_objects(self, created):
+        if created["lesson"]:
+            for unit in self.client.get("units", lesson=created["lesson"]).get("units", []):
+                self.client.delete(f"units/{unit['id']}")
+            self.client.delete(f"lessons/{created['lesson']}")
+        for sid in created["sections"]:
+            for uid in (self.client.by_ids("sections", [sid]) or [{}])[0].get("units") or []:
+                self.client.delete(f"units/{uid}")
+            self.client.delete(f"sections/{sid}")
+
     def rollback(self):
         """Возвращает урок к снимку перед последней публикацией из копии b."""
         if getattr(self, "_rolled_back", False):
