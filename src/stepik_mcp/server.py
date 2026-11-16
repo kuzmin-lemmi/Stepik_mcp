@@ -524,13 +524,61 @@ def stepik_plan_create_lesson(course_id: int, draft_path: str, module_position: 
 
 
 @mcp.tool(
-    description="План перестановки урока внутри его модуля на Stepik. Ничего не отправляет. lesson_position — "
-    "текущий номер вида 6.2, new_position — новое место в модуле (число). Применяется stepik_apply_push после "
-    "подтверждения автора; номера соседних уроков сдвинутся, .course.json обновится, файлы уроков не переносятся.",
+    description="План перестановки урока на Stepik: внутри модуля или в другой модуль. Ничего не отправляет. "
+    "lesson_position — текущий номер вида 6.2, new_position — новое место в модуле (число; при переносе в другой "
+    "модуль по умолчанию в конец), module_position — номер другого модуля для переноса (шаги, решения и комментарии "
+    "сохраняются). Применяется stepik_apply_push после подтверждения автора; номера соседних уроков сдвинутся, "
+    ".course.json обновится, файлы уроков не переносятся.",
     annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
 )
-def stepik_plan_move_lesson(course_id: int, lesson_position: str, new_position: int) -> str:
-    return _run(lambda: json.dumps(publish.plan_move_lesson(CLIENT, course_id, lesson_position, new_position),
+def stepik_plan_move_lesson(course_id: int, lesson_position: str, new_position: int | None = None,
+                            module_position: int | None = None) -> str:
+    return _run(lambda: json.dumps(publish.plan_move_lesson(CLIENT, course_id, lesson_position, new_position,
+                                                            module_position), ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="План создания нового пустого модуля (раздела) курса на Stepik. Ничего не отправляет. title — "
+    "название, module_position — место в курсе (по умолчанию в конец). Применяется stepik_apply_push после "
+    "подтверждения автора; создаётся папка модуля, .course.json обновляется. Уроки добавляются затем через "
+    "stepik_plan_create_lesson или переносятся stepik_plan_move_lesson с module_position.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_create_module(course_id: int, title: str, module_position: int | None = None) -> str:
+    return _run(lambda: json.dumps(publish.plan_create_module(CLIENT, course_id, title, module_position),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="План переименования модуля курса на Stepik. Ничего не отправляет. module_position — номер модуля, "
+    "title — новое название. Папка модуля на диске не переименовывается. Применяется stepik_apply_push после "
+    "подтверждения автора.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_rename_module(course_id: int, module_position: int, title: str) -> str:
+    return _run(lambda: json.dumps(publish.plan_rename_module(CLIENT, course_id, module_position, title),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="План перестановки модуля в курсе на Stepik вместе с его уроками. Ничего не отправляет. "
+    "module_position — текущий номер, new_position — новое место. Применяется stepik_apply_push после подтверждения "
+    "автора; номера модулей и их уроков в .course.json обновятся, файлы остаются на месте.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_move_module(course_id: int, module_position: int, new_position: int) -> str:
+    return _run(lambda: json.dumps(publish.plan_move_module(CLIENT, course_id, module_position, new_position),
+                                   ensure_ascii=False, indent=2))
+
+
+@mcp.tool(
+    description="План удаления пустого модуля курса на Stepik. Ничего не удаляет. Модуль с уроками не удаляется: "
+    "сначала перенесите уроки (stepik_plan_move_lesson с module_position) или удалите их (stepik_plan_delete_lesson). "
+    "Применяется stepik_apply_push с confirm_delete=[section_id], только если автор подтвердил удаление.",
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True),
+)
+def stepik_plan_delete_module(course_id: int, module_position: int) -> str:
+    return _run(lambda: json.dumps(publish.plan_delete_module(CLIENT, course_id, module_position),
                                    ensure_ascii=False, indent=2))
 
 
@@ -547,10 +595,11 @@ def stepik_plan_delete_lesson(course_id: int, lesson_position: str) -> str:
 
 @mcp.tool(
     description="Публикует на Stepik план из stepik_plan_push, stepik_rollback_lesson или "
-    "stepik_plan_create_lesson, stepik_plan_move_lesson, stepik_plan_delete_lesson: загружает картинки, меняет, добавляет или восстанавливает шаги, создаёт, переименовывает, переставляет и удаляет уроки. Вызывать только после того, как автор увидел diff и явно "
+    "stepik_plan_create_lesson, stepik_plan_move_lesson, stepik_plan_delete_lesson, stepik_plan_create_module, "
+    "stepik_plan_rename_module, stepik_plan_move_module, stepik_plan_delete_module: загружает картинки, меняет, добавляет или восстанавливает шаги, создаёт, переименовывает, переставляет и удаляет уроки и модули. Вызывать только после того, как автор увидел diff и явно "
     "подтвердил публикацию. confirm_steps — step_id из плана, которые уже решали ученики; передавайте их, только "
     "если автор согласился изменить именно эти шаги. confirm_delete — ровно те step_id, которые план удаляет; "
-    "передавайте их, только если автор подтвердил удаление (для удаления урока — [lesson_id]). Перед записью проверяет, что файл и урок на Stepik не "
+    "передавайте их, только если автор подтвердил удаление (для удаления урока — [lesson_id], модуля — [section_id]). Перед записью проверяет, что файл и урок на Stepik не "
     "менялись, и сохраняет снимок урока в snapshots/.",
     annotations=ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_hint=False,
                                 open_world_hint=True),

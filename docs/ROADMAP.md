@@ -173,6 +173,7 @@ _2026-11-02: публикация заданий, проверки, локаль
 
 - [ ] Команда `course init`: `COURSE_SPEC.md`, `COURSE_STYLE.md`, `AGENTS.md`, `COURSE_MAP.md`, `.course.json`.
 - [ ] Структура модулей и уроков создаётся локально, после проверки публикуется «скелет» курса.
+  - [x] Модули через plan/apply: `stepik_plan_create_module`, `stepik_plan_rename_module`, `stepik_plan_move_module`, `stepik_plan_delete_module` (только пустой модуль); перенос урока в другой модуль — `stepik_plan_move_lesson(module_position=...)`. Проверено на 241862 (2026-11-16): Stepik принимает `POST/PUT/DELETE sections`, соседние модули сам не сдвигает (порядок выставляется явно), урок переносится в другой модуль через `PUT units` со сменой `section`. Живой тест — `test_modules_create_move_delete`.
 - [ ] Staging → production: перенос проверенного урока и карта соответствия ID.
 
 ## Этап 7. Дополнительно (позже)
